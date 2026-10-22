@@ -1,0 +1,645 @@
+# =====================================================================
+# Home Assistant: Sensoren für den Pössl-Fernmonitor (Webhook-Fassung)
+#
+# Der Monitor schickt pro Zyklus ein JSON per HTTP an einen Webhook.
+# Es ist kein MQTT-Broker beteiligt. Jede eintreffende Meldung aktualisiert
+# alle Sensoren auf einmal.
+#
+# Die Webhook-ID muss mit der Adresse in der secrets.yaml des Monitors
+# übereinstimmen (ha_webhook_url). Sie ist frei wählbar, sollte aber nicht
+# erratbar sein.
+#
+# Die Sensoren behalten ihren letzten Wert, bis die nächste Meldung kommt.
+# Ob die Werte noch frisch sind, zeigt "Pössl Monitor aktuell": an, solange
+# die letzte Meldung jünger als 2 h 15 min ist. Die Ersatz-Sensoren fürs
+# Dashboard nutzen Monitor-Werte nur, solange dieser Sensor an ist.
+# =====================================================================
+
+template:
+  - triggers:
+      - trigger: webhook
+        webhook_id: "poessl-monitor-EIGENE-ZUFALLS-ID"
+        allowed_methods:
+          - POST
+        local_only: true
+    sensor:
+      - name: "Pössl Monitor Ladestand"
+        unique_id: poessl_monitor_wh_soc
+        state: "{{ trigger.json.soc }}"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+
+      - name: "Pössl Monitor Batteriespannung"
+        unique_id: poessl_monitor_wh_voltage
+        state: "{{ trigger.json.voltage }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Pössl Monitor Batteriestrom"
+        unique_id: poessl_monitor_wh_current
+        state: "{{ trigger.json.current }}"
+        unit_of_measurement: "A"
+        device_class: current
+        state_class: measurement
+
+      - name: "Pössl Monitor Entnommene Ah"
+        unique_id: poessl_monitor_wh_consumed_ah
+        state: "{{ trigger.json.consumed_ah }}"
+        unit_of_measurement: "Ah"
+        state_class: measurement
+
+      - name: "Pössl Monitor Restlaufzeit"
+        unique_id: poessl_monitor_wh_time_to_go
+        state: "{{ trigger.json.time_to_go_min }}"
+        unit_of_measurement: "min"
+        device_class: duration
+        state_class: measurement
+
+      - name: "Pössl Monitor Starterbatterie"
+        unique_id: poessl_monitor_wh_starter_voltage
+        state: "{{ trigger.json.starter_voltage }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Pössl Monitor Solarleistung"
+        unique_id: poessl_monitor_wh_pv_power
+        state: "{{ trigger.json.pv_power }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+      - name: "Pössl Monitor Solarertrag heute"
+        unique_id: poessl_monitor_wh_yield_today
+        state: "{{ trigger.json.yield_today_kwh }}"
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+
+      - name: "Pössl Monitor Solar-Ladestrom"
+        unique_id: poessl_monitor_wh_mppt_current
+        state: "{{ trigger.json.mppt_current }}"
+        unit_of_measurement: "A"
+        device_class: current
+        state_class: measurement
+
+      # Strom am Lastausgang des Ladereglers (Erhaltungslader Starterbatterie).
+      # Sendet die Firmware das Feld noch nicht, bleibt der Sensor unbekannt.
+      - name: "Pössl Monitor Lastausgang Strom"
+        unique_id: poessl_monitor_wh_load_current
+        state: "{{ trigger.json.load_current | default(none) }}"
+        unit_of_measurement: "A"
+        device_class: current
+        state_class: measurement
+
+      - name: "Pössl Monitor Laderegler-Zustand"
+        unique_id: poessl_monitor_wh_mppt_state
+        state: "{{ trigger.json.mppt_state or none }}"
+
+      - name: "Pössl Monitor Letzte Meldung"
+        unique_id: poessl_monitor_wh_last_seen
+        state: "{{ (trigger.json.ts | int(0)) | as_datetime | as_local }}"
+        device_class: timestamp
+
+      # Erwarteter Zeitpunkt der nächsten Meldung: jetzt plus die gemeldete
+      # Schlafdauer plus die Zeit, die der Monitor vom Aufwachen bis zum
+      # Senden braucht. Sendet die Firmware die Felder noch nicht, wird mit
+      # 30 Minuten und 45 Sekunden gerechnet.
+      - name: "Pössl Monitor Nächste Meldung"
+        unique_id: poessl_monitor_wh_next_due
+        state: >
+          {{ (now() + timedelta(minutes=trigger.json.next_min | default(30) | int(30),
+                                seconds=trigger.json.awake_s | default(45) | int(45))
+             ).replace(microsecond=0) }}
+        device_class: timestamp
+
+      # ---------------------------------------------------------------
+      # Funksensoren (Gas, Innenraum, Technik, Kühlschrank, Gefrierfach):
+      # Erwischt der Monitor in einem Zyklus keinen Wert von einem Sensor,
+      # bleibt der letzte Wert bis zu sechs Stunden stehen, statt auf
+      # "Unbekannt" zu springen. Das Attribut "stand" nennt die Zeit der
+      # letzten echten Messung. Bleibt ein Sensor länger stumm, wird der
+      # Wert unbekannt, damit ein leerer Sensor nicht unbemerkt bleibt.
+      # ---------------------------------------------------------------
+      - name: "Pössl Monitor Gas Füllstand"
+        unique_id: poessl_monitor_wh_gas_level
+        state: >
+          {% set v = trigger.json.gas_level | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        attributes:
+          stand: >
+            {% if trigger.json.gas_level | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Gas Temperatur"
+        unique_id: poessl_monitor_wh_gas_temp
+        state: >
+          {% set v = trigger.json.gas_temp | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "°C"
+        device_class: temperature
+        attributes:
+          stand: >
+            {% if trigger.json.gas_temp | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Gas Sensorbatterie"
+        unique_id: poessl_monitor_wh_gas_battery
+        state: >
+          {% set v = trigger.json.gas_battery | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        device_class: battery
+        attributes:
+          stand: >
+            {% if trigger.json.gas_battery | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Innenraum Temperatur"
+        unique_id: poessl_monitor_wh_room_temp
+        state: >
+          {% set v = trigger.json.room_temp | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "°C"
+        device_class: temperature
+        attributes:
+          stand: >
+            {% if trigger.json.room_temp | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Innenraum Luftfeuchte"
+        unique_id: poessl_monitor_wh_room_humidity
+        state: >
+          {% set v = trigger.json.room_humidity | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v | round(0) | int }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        device_class: humidity
+        attributes:
+          stand: >
+            {% if trigger.json.room_humidity | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Innenraum Sensorbatterie"
+        unique_id: poessl_monitor_wh_room_battery
+        state: >
+          {% set v = trigger.json.room_battery | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        device_class: battery
+        attributes:
+          stand: >
+            {% if trigger.json.room_battery | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Multiplus Temperatur"
+        unique_id: poessl_monitor_wh_multiplus_temp
+        state: >
+          {% set v = trigger.json.multiplus_temp | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "°C"
+        device_class: temperature
+        attributes:
+          stand: >
+            {% if trigger.json.multiplus_temp | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Multiplus Sensorbatterie"
+        unique_id: poessl_monitor_wh_multiplus_battery
+        state: >
+          {% set v = trigger.json.multiplus_battery | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        device_class: battery
+        attributes:
+          stand: >
+            {% if trigger.json.multiplus_battery | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      # Kühlschrank und Gefrierfach. Sendet die Firmware die Felder noch
+      # nicht, bleiben die Sensoren unbekannt.
+      - name: "Pössl Monitor Kühlschrank Temperatur"
+        unique_id: poessl_monitor_wh_fridge_temp
+        state: >
+          {% set v = trigger.json.fridge_temp | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "°C"
+        device_class: temperature
+        attributes:
+          stand: >
+            {% if trigger.json.fridge_temp | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Kühlschrank Sensorbatterie"
+        unique_id: poessl_monitor_wh_fridge_battery
+        state: >
+          {% set v = trigger.json.fridge_battery | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        device_class: battery
+        attributes:
+          stand: >
+            {% if trigger.json.fridge_battery | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Gefrierfach Temperatur"
+        unique_id: poessl_monitor_wh_freezer_temp
+        state: >
+          {% set v = trigger.json.freezer_temp | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "°C"
+        device_class: temperature
+        attributes:
+          stand: >
+            {% if trigger.json.freezer_temp | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Gefrierfach Sensorbatterie"
+        unique_id: poessl_monitor_wh_freezer_battery
+        state: >
+          {% set v = trigger.json.freezer_battery | default(none) %}
+          {% set stand = (this.attributes.stand | default('')) | as_datetime(none) if this else none %}
+          {% if v is not none %}{{ v }}
+          {% elif stand is not none and now() - stand < timedelta(hours=6) and is_number(this.state) %}{{ this.state }}
+          {% else %}{{ none }}{% endif %}
+        unit_of_measurement: "%"
+        device_class: battery
+        attributes:
+          stand: >
+            {% if trigger.json.freezer_battery | default(none) is not none %}{{ now().isoformat() }}
+            {% elif this %}{{ this.attributes.stand | default(none) }}
+            {% else %}{{ none }}{% endif %}
+        state_class: measurement
+
+      - name: "Pössl Monitor Zelle 1"
+        unique_id: poessl_monitor_wh_cell1
+        state: "{{ trigger.json.cell1 }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Pössl Monitor Zelle 2"
+        unique_id: poessl_monitor_wh_cell2
+        state: "{{ trigger.json.cell2 }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Pössl Monitor Zelle 3"
+        unique_id: poessl_monitor_wh_cell3
+        state: "{{ trigger.json.cell3 }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Pössl Monitor Zelle 4"
+        unique_id: poessl_monitor_wh_cell4
+        state: "{{ trigger.json.cell4 }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+
+      - name: "Pössl Monitor BMS Temperatur"
+        unique_id: poessl_monitor_wh_bms_temp
+        state: "{{ trigger.json.bms_temp }}"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+
+      - name: "Pössl Monitor BMS Ladezyklen"
+        unique_id: poessl_monitor_wh_bms_cycles
+        state: "{{ trigger.json.bms_cycles }}"
+        state_class: total_increasing
+
+      - name: "Pössl Monitor BMS Fehlercode"
+        unique_id: poessl_monitor_wh_bms_fault
+        state: "{{ trigger.json.bms_fault }}"
+
+      # Ladestand, wie ihn das BMS selbst berechnet. Zusätzlich zum Wert des
+      # SmartShunt ("Pössl Monitor Ladestand").
+      - name: "Pössl Monitor BMS Ladestand"
+        unique_id: poessl_monitor_wh_bms_soc
+        state: "{{ trigger.json.bms_soc | default(none) }}"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+
+      - name: "Pössl Monitor Übersprungene Zyklen"
+        unique_id: poessl_monitor_wh_skipped
+        state: "{{ trigger.json.skipped | default(0) }}"
+        state_class: measurement
+
+      - name: "Pössl Monitor Letzter Fehlstart"
+        unique_id: poessl_monitor_wh_fault
+        state: >
+          {% set code = trigger.json.fault | default(0) | int(0) %}
+          {% set namen = {0: 'keiner', 4: 'Absturz', 5: 'Watchdog',
+                          6: 'Watchdog', 7: 'Watchdog', 9: 'Brownout'} %}
+          {{ namen.get(code, 'Code ' ~ code) }}
+
+  - binary_sensor:
+      - name: "Pössl Monitor aktuell"
+        unique_id: poessl_monitor_wh_fresh
+        device_class: connectivity
+        state: >
+          {% set t = states('sensor.possl_monitor_letzte_meldung') | as_datetime(none) %}
+          {{ t is not none and (now() - t) < timedelta(minutes=135) }}
+
+  # Letzte verschickte Benachrichtigung, damit sie auch nach dem Wegwischen
+  # auf dem Handy nachzulesen ist. Das Skript possl_melden löst das Ereignis
+  # aus, der Sensor merkt sich Titel, Text und Zeitpunkt.
+  - triggers:
+      - trigger: event
+        event_type: possl_meldung
+    sensor:
+      - name: "Pössl Letzte Benachrichtigung"
+        unique_id: possl_last_notification
+        icon: mdi:message-text-outline
+        state: "{{ trigger.event.data.title }}"
+        attributes:
+          text: "{{ trigger.event.data.message }}"
+          zeit: "{{ now().isoformat() }}"
+          # Die letzten zehn Meldungen, neueste zuerst, für die Seite
+          # "Meldungen".
+          verlauf: >
+            {% set neu = [{'zeit': now().isoformat(), 'title': trigger.event.data.title, 'text': trigger.event.data.message}] %}
+            {% set alt = (this.attributes.verlauf | default([])) if this else [] %}
+            {{ (neu + (alt if alt is iterable and alt is not string else []))[:10] }}
+
+  # An, solange die letzte Benachrichtigung jünger als 24 Stunden ist.
+  # Die Dashboards zeigen in dieser Zeit die Plakette "Neue Meldung".
+  - binary_sensor:
+      - name: "Pössl Benachrichtigung neu"
+        unique_id: possl_notification_recent
+        state: >
+          {% set z = state_attr('sensor.possl_letzte_benachrichtigung', 'zeit') | as_datetime(none) %}
+          {{ z is not none and now() - z < timedelta(hours=24) }}
+
+automation:
+  - alias: "Pössl: Frostwarnung"
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.possl_monitor_innenraum_temperatur
+        below: 3
+    actions:
+      - action: script.possl_melden
+        data:
+          title: "Pössl: Frostgefahr"
+          message: "Innenraum {{ states('sensor.possl_monitor_innenraum_temperatur') }} °C"
+
+  # Nutzt den Ersatz-Sensor: Cerbo, sonst Shunt, sonst BMS. So greift der
+  # Alarm auch, solange der Shunt noch keinen Ladestand liefert.
+  - alias: "Pössl: Ladestand niedrig"
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.possl_ladestand
+        below: 30
+    actions:
+      - action: script.possl_melden
+        data:
+          title: "Pössl: Batterie niedrig"
+          message: >
+            Ladestand {{ states('sensor.possl_ladestand') }} %
+            (Quelle: {{ state_attr('sensor.possl_ladestand', 'quelle') }})
+
+  # Rückversicherung über die Spannung. Der Shunt zählt sehr kleine Ströme
+  # nicht mit, der angezeigte Ladestand kann über Wochen ohne Vollladung
+  # deshalb etwas zu hoch liegen. Die Spannung lässt sich nicht täuschen:
+  # Unter 12,8 V in Ruhe ist ein LiFePO4-Akku weitgehend leer.
+  - alias: "Pössl: Batteriespannung niedrig"
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.possl_batteriespannung
+        below: 12.8
+        for:
+          hours: 1
+    actions:
+      - action: script.possl_melden
+        data:
+          title: "Pössl: Batteriespannung niedrig"
+          message: >
+            Aufbaubatterie seit einer Stunde unter 12,8 V
+            (aktuell {{ states('sensor.possl_batteriespannung') }} V,
+            Ladestand laut Anzeige {{ states('sensor.possl_ladestand') }} %).
+
+  # Starterbatterie: warnt, wenn die Spannung zwei Stunden lang unter 12,4 V
+  # liegt, also bei etwa 75 % Ladung. Früh genug, um vor Frost nachzuladen;
+  # die Pandora-Alarmanlage zieht dauerhaft an dieser Batterie. Zwei Quellen, damit eine allein ausfallen darf: der Hilfseingang
+  # des SmartShunt über den Monitor und der Fahrzeugsensor.
+  - alias: "Pössl: Starterbatterie niedrig"
+    triggers:
+      - trigger: numeric_state
+        entity_id:
+          - sensor.possl_monitor_starterbatterie
+          - sensor.DEINE_PANDORA_ID_battery_voltage
+        below: 12.4
+        for:
+          hours: 2
+    actions:
+      - action: script.possl_melden
+        data:
+          title: "Pössl: Starterbatterie niedrig"
+          message: >
+            Starterbatterie bei {{ trigger.to_state.state }} V
+            ({{ trigger.to_state.name }}), etwa 75 % oder weniger.
+            Nachladen, z. B. Lastausgang am Solarregler auf "Immer an"
+            oder Ladegerät anschließen.
+
+  - alias: "Pössl: Monitor meldet sich nicht"
+    triggers:
+      # Löst aus, sobald der Zeitstempel der letzten Meldung älter als
+      # 4 h 15 min ist. Das verträgt eine ausgefallene Meldung im Nachttakt
+      # (2 h). Ist der Sensor noch unbekannt, bleibt die Bedingung falsch.
+      - trigger: template
+        value_template: >
+          {{ now() - (states('sensor.possl_monitor_letzte_meldung')
+             | as_datetime(now())) > timedelta(minutes=255) }}
+    actions:
+      - action: script.possl_melden
+        data:
+          title: "Pössl: keine Daten"
+          message: "Der Fernmonitor hat sich seit über vier Stunden nicht gemeldet."
+
+  - alias: "Pössl: Fehlstart gemeldet"
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.possl_monitor_ubersprungene_zyklen
+        above: 0
+    actions:
+      # Kurz warten: Der Sensor "Letzter Fehlstart" kommt aus derselben
+      # Meldung, wird aber erst nach "Übersprungene Zyklen" aktualisiert.
+      # Ohne die Pause stünde im Text noch der alte Grund ("keiner").
+      - delay: 5
+      - action: script.possl_melden
+        data:
+          title: "Pössl: Fehlstart"
+          message: >
+            {{ states('sensor.possl_monitor_ubersprungene_zyklen') }} Zyklus/Zyklen
+            übersprungen, Grund: {{ states('sensor.possl_monitor_letzter_fehlstart') }}.
+
+  # Jeden Sonntag um 18 Uhr eine Zusammenfassung. Sie ersetzt im Winter das
+  # tägliche Nachschauen und zeigt nebenbei, dass die ganze Kette noch läuft.
+  # Zum Testen: Automation öffnen und "Aktionen ausführen" wählen.
+  - alias: "Pössl: Wochenbericht"
+    triggers:
+      - trigger: time
+        at: "18:00:00"
+    conditions:
+      - condition: time
+        weekday:
+          - sun
+    actions:
+      - action: script.possl_melden
+        data:
+          title: "Pössl: Wochenbericht"
+          message: |
+            {%- macro wert(e, einheit, stellen=0) -%}
+              {%- set v = states(e) -%}
+              {%- if is_number(v) -%}{{ ('%.' ~ stellen ~ 'f') | format(v | float) | replace('.', ',') }} {{ einheit }}{%- else -%}kein Wert{%- endif -%}
+            {%- endmacro -%}
+            {%- set b7 = states('sensor.possl_bilanz_7_tage') -%}
+            {%- set woche = states('sensor.possl_solarertrag_woche') -%}
+            {%- set alt = states('sensor.possl_monitor_letzte_meldung') | as_datetime(none) -%}
+            {%- set zellen = {'Gassensor': 'gas', 'Innenraum': 'innenraum', 'Technik': 'multiplus', 'Kühlschrank': 'kuhlschrank', 'Gefrierfach': 'gefrierfach'} -%}
+            {%- set ns = namespace(schwach=[]) -%}
+            {%- for name, kurz in zellen.items() -%}
+              {%- set v = states('sensor.possl_monitor_' ~ kurz ~ '_sensorbatterie') -%}
+              {%- if is_number(v) and v | float < 40 -%}{%- set ns.schwach = ns.schwach + [name ~ ' ' ~ (v | float | round(0) | int) ~ ' %'] -%}{%- endif -%}
+            {%- endfor -%}
+            Batterie: {{ wert('sensor.possl_ladestand', '%') }} ({{ state_attr('sensor.possl_ladestand', 'quelle') or 'Quelle unbekannt' }}), {{ wert('sensor.possl_batteriespannung', 'V', 2) }}
+            {%- set tage = (state_attr('sensor.possl_bilanz_7_tage', 'age_coverage_ratio') | float(0) * 7) | round(0) | int %}
+            Bilanz {{ '7 Tage' if tage >= 6 else ('seit weniger als einem Tag' if tage < 1 else 'seit ' ~ tage ~ (' Tag' if tage == 1 else ' Tagen')) }}: {{ ('±0' if b7 | float | round(0) == 0 else '%+d' | format(b7 | float | round(0) | int)) ~ ' %' if is_number(b7) else 'noch keine Daten' }}
+            Solar diese Woche: {{ ((woche | float * 1000) | round(0) | int) ~ ' Wh' if is_number(woche) else 'kein Wert' }}
+            Starterbatterie: {{ wert('sensor.possl_monitor_starterbatterie', 'V', 1) }}
+            Innenraum: {{ wert('sensor.possl_monitor_innenraum_temperatur', '°C', 1) }}, tiefster Wert der Woche {{ wert('sensor.possl_innenraum_minimum_7_tage', '°C', 1) }}
+            Gas: {{ wert('sensor.possl_monitor_gas_fullstand', '%') }}
+            Fernmonitor: {{ 'letzte Meldung vor ' ~ ((now() - alt).total_seconds() / 60) | round(0) | int ~ ' min' if alt is not none else 'keine Meldung bekannt' }}, Fehlstarts {{ states('sensor.possl_monitor_ubersprungene_zyklen') }}
+            Schwache Knopfzellen: {{ ns.schwach | join(', ') if ns.schwach else 'keine' }}
+
+# ---------------------------------------------------------------------
+# Eine Stelle für alle Benachrichtigungen. Sämtliche Automationen oben
+# rufen dieses Skript auf, es schickt jede Meldung an beide iPhones.
+#
+# Die beiden Dienstnamen sind aus den Gerätenamen abgeleitet ("HANDY_1",
+# "HANDY_2"). Ob sie genau so heißen, zeigt Entwicklerwerkzeuge >
+# Aktionen, wenn man dort notify.mobile_app eintippt. Stimmt ein Name nicht,
+# bekommt nur dieses eine Gerät nichts, das andere wird trotzdem bedient.
+# ---------------------------------------------------------------------
+script:
+  possl_melden:
+    alias: "Pössl: Meldung senden"
+    mode: queued
+    fields:
+      title:
+        description: Überschrift der Meldung
+      message:
+        description: Text der Meldung
+    sequence:
+      # Text für das Dashboard festhalten
+      - event: possl_meldung
+        event_data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+      - action: notify.mobile_app_HANDY_1
+        continue_on_error: true
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+          # Ein Tipp auf die Mitteilung öffnet die Seite "Meldungen" mit dem
+          # vollen Text.
+          data:
+            url: /lovelace/info
+      - action: notify.mobile_app_HANDY_2
+        continue_on_error: true
+        data:
+          title: "{{ title }}"
+          message: "{{ message }}"
+          # Ein Tipp auf die Mitteilung öffnet die Seite "Meldungen" mit dem
+          # vollen Text.
+          data:
+            url: /lovelace/info
+
+# ---------------------------------------------------------------------
+# Zähler und Statistik für den Wochenbericht
+# ---------------------------------------------------------------------
+# Solarertrag des Dachs, aufsummiert aus dem Tageszähler des Ladereglers.
+# Die Woche beginnt montags. Der Jahreszähler zeigt im Frühjahr, was der
+# Winter gebracht hat.
+utility_meter:
+  possl_solarertrag_woche:
+    name: "Pössl Solarertrag Woche"
+    unique_id: possl_yield_week
+    source: sensor.possl_monitor_solarertrag_heute
+    cycle: weekly
+  possl_solarertrag_jahr:
+    name: "Pössl Solarertrag Jahr"
+    unique_id: possl_yield_year
+    source: sensor.possl_monitor_solarertrag_heute
+    cycle: yearly
+
+sensor:
+  - platform: statistics
+    name: "Pössl Innenraum Minimum 7 Tage"
+    unique_id: possl_room_min_7d
+    entity_id: sensor.possl_monitor_innenraum_temperatur
+    state_characteristic: value_min
+    max_age:
+      days: 7
+    precision: 1

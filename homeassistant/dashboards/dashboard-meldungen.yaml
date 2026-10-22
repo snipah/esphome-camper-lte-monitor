@@ -1,0 +1,61 @@
+# =====================================================================
+# Pössl: Ansicht "Meldungen" (Adresse /lovelace/info)
+#
+# Zeigt die letzte Benachrichtigung im vollen Wortlaut (Wochenbericht oder
+# Warnung) und darunter die neun davor. Ein Tipp auf die Mitteilung am
+# iPhone öffnet genau diese Seite.
+#
+# Einfügen: die Ansicht "info" öffnen > Stift an der Ansicht > "In YAML
+# bearbeiten", den ganzen Inhalt ersetzen. Der Pfad "info" muss so bleiben,
+# die Benachrichtigungen und die Plakette "Neue Meldung" verweisen darauf.
+# =====================================================================
+title: Meldungen
+path: info
+icon: mdi:message-text-outline
+type: sections
+max_columns: 2
+sections:
+- type: grid
+  cards:
+  - type: heading
+    heading: Letzte Meldung
+    heading_style: title
+    icon: mdi:message-text-outline
+  - type: markdown
+    grid_options:
+      columns: full
+    content: |-
+      {% set z = state_attr('sensor.possl_letzte_benachrichtigung', 'zeit') | as_datetime(none) %}
+      {% set text = state_attr('sensor.possl_letzte_benachrichtigung', 'text') %}
+      {% if z is none %}
+      Noch keine Meldung verschickt.
+      {% else %}
+      ## {{ states('sensor.possl_letzte_benachrichtigung') }}
+
+      {{ (z | as_local).strftime('%d.%m.%Y, %H:%M Uhr') }}
+
+      {{ (text or '') | replace('\n', '  \n') }}
+      {% endif %}
+- type: grid
+  cards:
+  - type: heading
+    heading: Frühere Meldungen
+    heading_style: title
+    icon: mdi:history
+  - type: markdown
+    grid_options:
+      columns: full
+    content: |-
+      {% set v = state_attr('sensor.possl_letzte_benachrichtigung', 'verlauf') or [] %}
+      {% if v | length > 1 %}
+      {% for m in v[1:] %}
+      **{{ m.title }}** &nbsp;·&nbsp; {{ (m.zeit | as_datetime | as_local).strftime('%d.%m. %H:%M') }}
+
+      {{ m.text | replace('\n', '  \n') }}
+
+      ---
+
+      {% endfor %}
+      {% else %}
+      Noch keine früheren Meldungen.
+      {% endif %}

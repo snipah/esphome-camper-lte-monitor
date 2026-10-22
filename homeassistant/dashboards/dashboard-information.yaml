@@ -1,0 +1,589 @@
+# =====================================================================
+# Pössl: Ansicht "Information"
+#
+# Klima und Gas (immer sichtbar, Werte vom Cerbo oder vom Fernmonitor),
+# Heizung, Warmwasser und Licht (nur solange der Pössl an ist), dazu
+# Wetter und Türen.
+# Die Statuszeile zeigt nur, was Aufmerksamkeit braucht: Truma-Zustand,
+# offene Türen, zu warmer Kühlschrank, schwache Knopfzellen der
+# Funksensoren (unter 40 %).
+#
+# Einfügen: Ansicht bearbeiten > Stift an der Ansicht > "In YAML bearbeiten",
+# den ganzen Inhalt ersetzen.
+# Braucht aus HACS nur die weather-card.
+# =====================================================================
+title: Information
+icon: mdi:water-circle
+type: sections
+max_columns: 3
+badges:
+- type: entity
+  entity: sensor.possl_monitor_letzte_meldung
+  name: Letzte Meldung
+  icon: mdi:satellite-uplink
+  show_name: true
+  state_content: state
+  time_format: relative
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_cerbo_live
+    state_not: 'on'
+- type: entity
+  entity: sensor.possl_nachste_meldung
+  name: Nächste Meldung
+  icon: mdi:timer-sand
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_cerbo_live
+    state_not: 'on'
+- type: entity
+  entity: binary_sensor.possl_benachrichtigung_neu
+  name: Neue Meldung
+  icon: mdi:message-alert-outline
+  color: amber
+  show_name: true
+  show_state: false
+  tap_action:
+    action: navigate
+    navigation_path: /lovelace/info
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_benachrichtigung_neu
+    state: 'on'
+- type: entity
+  entity: binary_sensor.possl_monitor_aktuell
+  name: Monitor
+  icon: mdi:lan-disconnect
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_monitor_aktuell
+    state: 'off'
+- type: entity
+  entity: sensor.truma_operating_status
+  name: Truma
+  icon: mdi:radiator
+  show_name: true
+  visibility:
+  - condition: state
+    entity: climate.esp_truma_truma_room
+    state_not: unavailable
+- type: entity
+  entity: climate.esp_truma_truma_room
+  name: Truma
+  icon: mdi:power-plug-off-outline
+  show_name: true
+  visibility:
+  - condition: state
+    entity: climate.esp_truma_truma_room
+    state: unavailable
+- type: entity
+  entity: binary_sensor.esp_truma_cp_plus_alive
+  name: Truma-Bedienteil getrennt
+  icon: mdi:lan-disconnect
+  color: red
+  show_name: true
+  show_state: false
+  visibility:
+  - condition: state
+    entity: binary_sensor.esp_truma_cp_plus_alive
+    state: 'off'
+- type: entity
+  entity: sensor.esp_truma_truma_fehlercode
+  name: Truma-Fehler
+  icon: mdi:alert-octagon-outline
+  color: red
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.esp_truma_truma_fehlercode
+    above: 0
+- type: entity
+  entity: binary_sensor.DEINE_PANDORA_ID_driver_door
+  name: Fahrertür
+  icon: mdi:car-door
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.DEINE_PANDORA_ID_driver_door
+    state: 'on'
+- type: entity
+  entity: binary_sensor.DEINE_PANDORA_ID_passenger_door
+  name: Beifahrertür
+  icon: mdi:car-door
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.DEINE_PANDORA_ID_passenger_door
+    state: 'on'
+- type: entity
+  entity: binary_sensor.DEINE_PANDORA_ID_right_back_door
+  name: Schiebetür
+  icon: mdi:door-sliding-open
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.DEINE_PANDORA_ID_right_back_door
+    state: 'on'
+- type: entity
+  entity: binary_sensor.DEINE_PANDORA_ID_trunk
+  name: Heck
+  icon: mdi:car-back
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.DEINE_PANDORA_ID_trunk
+    state: 'on'
+- type: entity
+  entity: binary_sensor.DEINE_PANDORA_ID_left_back_door
+  name: Motorhaube
+  icon: mdi:engine-outline
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.DEINE_PANDORA_ID_left_back_door
+    state: 'on'
+- type: entity
+  entity: sensor.possl_kuhlschrank
+  name: Kühlschrank zu warm
+  icon: mdi:fridge-alert-outline
+  color: red
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_kuhlschrank
+    above: 9
+  - condition: state
+    entity: binary_sensor.possl_kuhlschrank_lauft
+    state: 'on'
+- type: entity
+  entity: sensor.possl_gefrierfach
+  name: Gefrierfach zu warm
+  icon: mdi:snowflake-alert
+  color: red
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_gefrierfach
+    above: -8
+  - condition: state
+    entity: binary_sensor.possl_gefrierfach_lauft
+    state: 'on'
+- type: entity
+  entity: sensor.possl_monitor_gas_sensorbatterie
+  name: Knopfzelle Gassensor
+  icon: mdi:battery-alert-variant-outline
+  color: orange
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_gas_sensorbatterie
+    below: 40
+- type: entity
+  entity: sensor.possl_monitor_innenraum_sensorbatterie
+  name: Knopfzelle Innenraum
+  icon: mdi:battery-alert-variant-outline
+  color: orange
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_innenraum_sensorbatterie
+    below: 40
+- type: entity
+  entity: sensor.possl_monitor_multiplus_sensorbatterie
+  name: Knopfzelle Technik
+  icon: mdi:battery-alert-variant-outline
+  color: orange
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_multiplus_sensorbatterie
+    below: 40
+- type: entity
+  entity: sensor.possl_monitor_kuhlschrank_sensorbatterie
+  name: Knopfzelle Kühlschrank
+  icon: mdi:battery-alert-variant-outline
+  color: orange
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_kuhlschrank_sensorbatterie
+    below: 40
+- type: entity
+  entity: sensor.possl_monitor_gefrierfach_sensorbatterie
+  name: Knopfzelle Gefrierfach
+  icon: mdi:battery-alert-variant-outline
+  color: orange
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_gefrierfach_sensorbatterie
+    below: 40
+sections:
+- type: grid
+  cards:
+  - type: heading
+    heading: Klima
+    heading_style: title
+    icon: mdi:thermometer
+  - type: tile
+    entity: sensor.possl_innenraum
+    name: Innenraum
+    icon: mdi:home-thermometer-outline
+    color: deep-orange
+    features:
+    - type: trend-graph
+      hours_to_show: 48
+    grid_options:
+      columns: 6
+  - type: tile
+    entity: sensor.possl_innenraum_luftfeuchte
+    name: Luftfeuchte
+    icon: mdi:water-percent
+    color: light-blue
+    features:
+    - type: trend-graph
+      hours_to_show: 48
+    grid_options:
+      columns: 6
+  - type: tile
+    entity: sensor.possl_technikbereich
+    name: Technikbereich
+    icon: mdi:thermometer-lines
+    color: deep-orange
+    grid_options:
+      columns: full
+  - type: heading
+    heading: Kühlung
+    heading_style: subtitle
+    icon: mdi:fridge-outline
+    visibility:
+    - condition: or
+      conditions:
+      - condition: state
+        entity: sensor.possl_kuhlschrank
+        state_not:
+        - unavailable
+        - unknown
+      - condition: state
+        entity: sensor.possl_gefrierfach
+        state_not:
+        - unavailable
+        - unknown
+  - type: tile
+    entity: sensor.possl_kuhlschrank
+    name: Kühlschrank
+    icon: mdi:fridge-outline
+    color: cyan
+    features:
+    - type: trend-graph
+      hours_to_show: 24
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: sensor.possl_kuhlschrank
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: sensor.possl_gefrierfach
+    name: Gefrierfach
+    icon: mdi:snowflake
+    color: light-blue
+    features:
+    - type: trend-graph
+      hours_to_show: 24
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: sensor.possl_gefrierfach
+      state_not:
+      - unavailable
+      - unknown
+  - type: heading
+    heading: Gas
+    heading_style: subtitle
+    icon: mdi:propane-tank
+  - type: tile
+    entity: sensor.possl_gas
+    name: Gasflasche
+    icon: mdi:propane-tank
+    color: cyan
+    features:
+    - type: bar-gauge
+      min: 0
+      max: 100
+    grid_options:
+      columns: full
+- type: grid
+  visibility:
+  - condition: or
+    conditions:
+    - condition: state
+      entity: climate.esp_truma_truma_room
+      state_not: unavailable
+    - condition: state
+      entity: select.esp_truma_mode
+      state_not:
+      - unavailable
+      - unknown
+    - condition: state
+      entity: light.bett_2
+      state_not:
+      - unavailable
+      - unknown
+    - condition: state
+      entity: light.rgbw2_tasmota
+      state_not:
+      - unavailable
+      - unknown
+  cards:
+  - type: heading
+    heading: Heizung
+    heading_style: title
+    icon: mdi:radiator
+    badges:
+    - type: entity
+      entity: binary_sensor.esp_truma_cp_plus_alive
+      show_state: true
+      show_icon: true
+    visibility:
+    - condition: state
+      entity: climate.esp_truma_truma_room
+      state_not: unavailable
+  - type: tile
+    entity: climate.esp_truma_truma_room
+    name: Truma Heizung
+    icon: mdi:radiator
+    color: deep-orange
+    grid_options:
+      columns: full
+    features:
+    - type: target-temperature
+    - type: climate-hvac-modes
+    - type: climate-fan-modes
+      style: icons
+      fan_modes:
+      - 'off'
+      - low
+      - medium
+      - high
+    visibility:
+    - condition: state
+      entity: climate.esp_truma_truma_room
+      state_not: unavailable
+  - type: tile
+    entity: sensor.esp_truma_current_room_temperature
+    name: Raum
+    icon: mdi:home-thermometer
+    color: deep-orange
+    features:
+    - type: trend-graph
+      hours_to_show: 24
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: climate.esp_truma_truma_room
+      state_not: unavailable
+  - type: tile
+    entity: sensor.truma_operating_status
+    name: Modus
+    icon: mdi:radiator
+    color: orange
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: climate.esp_truma_truma_room
+      state_not: unavailable
+  - type: tile
+    entity: sensor.truma_fehlercode
+    name: Status
+    icon: mdi:wrench-check-outline
+    color: blue-grey
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: climate.esp_truma_truma_room
+      state_not: unavailable
+  - type: heading
+    heading: Warmwasser
+    heading_style: title
+    icon: mdi:water-boiler
+    badges:
+    - type: entity
+      entity: binary_sensor.esp_truma_water_heater_active
+      show_state: true
+      show_icon: true
+    visibility:
+    - condition: state
+      entity: select.esp_truma_mode
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: select.esp_truma_mode
+    name: Boiler
+    icon: mdi:water-boiler
+    color: deep-orange
+    features:
+    - type: select-options
+      style: buttons
+    grid_options:
+      columns: full
+    visibility:
+    - condition: state
+      entity: select.esp_truma_mode
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: sensor.esp_truma_current_water_temperature
+    name: Wasser
+    icon: mdi:water-thermometer
+    color: deep-orange
+    features:
+    - type: trend-graph
+      hours_to_show: 24
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: select.esp_truma_mode
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: sensor.wasser_ziel
+    name: Wasser Soll
+    icon: mdi:target
+    color: blue-grey
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: select.esp_truma_mode
+      state_not:
+      - unavailable
+      - unknown
+  - type: heading
+    heading: Licht
+    heading_style: title
+    icon: mdi:lightbulb-group-outline
+    visibility:
+    - condition: or
+      conditions:
+      - condition: state
+        entity: light.bett_2
+        state_not:
+        - unavailable
+        - unknown
+      - condition: state
+        entity: light.rgbw2_tasmota
+        state_not:
+        - unavailable
+        - unknown
+  - type: tile
+    entity: light.bett_2
+    tap_action:
+      action: toggle
+    features:
+    - type: light-brightness
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: light.bett_2
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: light.rgbw2_tasmota
+    tap_action:
+      action: toggle
+    features:
+    - type: light-brightness
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: light.rgbw2_tasmota
+      state_not:
+      - unavailable
+      - unknown
+- type: grid
+  cards:
+  - type: heading
+    heading: Wetter
+    heading_style: title
+    icon: mdi:weather-partly-cloudy
+  - type: custom:weather-card
+    entity: weather.home
+    current: false
+    details: false
+    forecast: true
+    grid_options:
+      columns: full
+  - type: heading
+    heading: Türen & Klappen
+    heading_style: title
+    icon: mdi:car-door
+  - type: tile
+    entity: binary_sensor.DEINE_PANDORA_ID_driver_door
+    name: Fahrer
+    icon: mdi:car-door
+    color: red
+    vertical: true
+    grid_options:
+      columns: 4
+  - type: tile
+    entity: binary_sensor.DEINE_PANDORA_ID_passenger_door
+    name: Beifahrer
+    icon: mdi:car-door
+    color: red
+    vertical: true
+    grid_options:
+      columns: 4
+  - type: tile
+    entity: binary_sensor.DEINE_PANDORA_ID_right_back_door
+    name: Schiebetür
+    icon: mdi:door-sliding
+    color: red
+    vertical: true
+    grid_options:
+      columns: 4
+  - type: tile
+    entity: binary_sensor.DEINE_PANDORA_ID_trunk
+    name: Heck
+    icon: mdi:car-back
+    color: red
+    vertical: true
+    grid_options:
+      columns: 4
+  - type: tile
+    entity: binary_sensor.DEINE_PANDORA_ID_left_back_door
+    name: Motorhaube
+    icon: mdi:engine-outline
+    color: red
+    vertical: true
+    grid_options:
+      columns: 4
+  - type: tile
+    entity: sensor.DEINE_PANDORA_ID_battery_voltage
+    name: Starterbatterie
+    icon: mdi:car-battery
+    color: blue-grey
+    vertical: true
+    grid_options:
+      columns: 4

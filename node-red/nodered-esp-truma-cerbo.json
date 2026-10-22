@@ -1,0 +1,538 @@
+[
+ {
+  "id": "poessl_temp_tab",
+  "type": "tab",
+  "label": "esp-truma → Cerbo",
+  "disabled": false,
+  "info": "Inkbird- und Mopeka-Werte vom esp-truma (MQTT auf dem Cerbo) als virtuelle Victron-Geräte."
+ },
+ {
+  "id": "poessl_cerbo_broker",
+  "type": "mqtt-broker",
+  "name": "Cerbo lokal",
+  "broker": "localhost",
+  "port": "1883",
+  "clientid": "",
+  "autoConnect": true,
+  "usetls": false,
+  "protocolVersion": "4",
+  "keepalive": "60",
+  "cleansession": true,
+  "autoUnsubscribe": true,
+  "birthTopic": "",
+  "birthQos": "0",
+  "birthPayload": "",
+  "birthMsg": {},
+  "closeTopic": "",
+  "closeQos": "0",
+  "closePayload": "",
+  "closeMsg": {},
+  "willTopic": "",
+  "willQos": "0",
+  "willPayload": "",
+  "willMsg": {},
+  "userProps": "",
+  "sessionExpiry": ""
+ },
+ {
+  "id": "poessl_kuehl_mqtt0",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "fridge",
+  "topic": "esp-truma/sensor/fridge/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 60,
+  "wires": [
+   [
+    "poessl_kuehl_fn",
+    "poessl_kuehl_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_kuehl_mqtt1",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "fridge_humidity",
+  "topic": "esp-truma/sensor/fridge_humidity/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 100,
+  "wires": [
+   [
+    "poessl_kuehl_fn",
+    "poessl_kuehl_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_kuehl_trig",
+  "type": "trigger",
+  "z": "poessl_temp_tab",
+  "name": "2 h ohne Wert",
+  "op1": "",
+  "op2": "timeout",
+  "op1type": "nul",
+  "op2type": "str",
+  "duration": "2",
+  "extend": true,
+  "overrideDelay": false,
+  "units": "hr",
+  "reset": "",
+  "bytopic": "all",
+  "topic": "topic",
+  "outputs": 1,
+  "x": 470,
+  "y": 100,
+  "wires": [
+   [
+    "poessl_kuehl_fn"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_kuehl_fn",
+  "type": "function",
+  "z": "poessl_temp_tab",
+  "name": "→ Kühlschrank",
+  "func": "// Wert vom esp-truma auf das virtuelle Victron-Gerät geben.\n// Der esp-truma meldet nur bei Änderungen, nachts oft lange nichts.\n// Bleiben Werte 2 h aus (ESP aus, Sensor weg), meldet der Trigger\n// \"timeout\" und das Gerät wird offline gemeldet statt alte Werte zu zeigen.\nconst online = context.get('online') || false;\n\nif (msg.payload === 'timeout') {\n    if (!online) return null;\n    context.set('online', false);\n    node.status({ fill: 'grey', shape: 'ring', text: 'offline' });\n    return { connected: false };\n}\n\nlet v = parseFloat(msg.payload);\nif (isNaN(v)) return null;   // \"nan\" bei fehlendem Sensorwert\n\nlet path = 'Temperature';\nif (msg.topic.endsWith('humidity/state')) path = 'Humidity';\nif (msg.topic.endsWith('level/state')) {\n    path = 'Level';\n    v = Math.min(100, Math.max(0, v));\n}\n\nconst out = [];\nif (!online) {\n    context.set('online', true);\n    out.push({ connected: true });\n}\nout.push({ payload: { [path]: Math.round(v * 10) / 10 } });\nnode.status({ fill: 'green', shape: 'dot', text: path + ' ' + v });\nreturn [out];",
+  "outputs": 1,
+  "timeout": 0,
+  "noerr": 0,
+  "initialize": "",
+  "finalize": "",
+  "libs": [],
+  "x": 700,
+  "y": 60,
+  "wires": [
+   [
+    "poessl_kuehl_virt"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_kuehl_virt",
+  "type": "victron-virtual",
+  "z": "poessl_temp_tab",
+  "name": "Kühlschrank",
+  "outputs": 1,
+  "device": "temperature",
+  "default_values": false,
+  "temperature_type": 1,
+  "include_humidity": true,
+  "include_pressure": false,
+  "include_temp_battery": false,
+  "temp_battery_voltage": 3.3,
+  "start_disconnected": true,
+  "x": 940,
+  "y": 60,
+  "wires": [
+   []
+  ]
+ },
+ {
+  "id": "poessl_gefrier_mqtt0",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "freezer",
+  "topic": "esp-truma/sensor/freezer/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 180,
+  "wires": [
+   [
+    "poessl_gefrier_fn",
+    "poessl_gefrier_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gefrier_trig",
+  "type": "trigger",
+  "z": "poessl_temp_tab",
+  "name": "2 h ohne Wert",
+  "op1": "",
+  "op2": "timeout",
+  "op1type": "nul",
+  "op2type": "str",
+  "duration": "2",
+  "extend": true,
+  "overrideDelay": false,
+  "units": "hr",
+  "reset": "",
+  "bytopic": "all",
+  "topic": "topic",
+  "outputs": 1,
+  "x": 470,
+  "y": 220,
+  "wires": [
+   [
+    "poessl_gefrier_fn"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gefrier_fn",
+  "type": "function",
+  "z": "poessl_temp_tab",
+  "name": "→ Gefrierfach",
+  "func": "// Wert vom esp-truma auf das virtuelle Victron-Gerät geben.\n// Der esp-truma meldet nur bei Änderungen, nachts oft lange nichts.\n// Bleiben Werte 2 h aus (ESP aus, Sensor weg), meldet der Trigger\n// \"timeout\" und das Gerät wird offline gemeldet statt alte Werte zu zeigen.\nconst online = context.get('online') || false;\n\nif (msg.payload === 'timeout') {\n    if (!online) return null;\n    context.set('online', false);\n    node.status({ fill: 'grey', shape: 'ring', text: 'offline' });\n    return { connected: false };\n}\n\nlet v = parseFloat(msg.payload);\nif (isNaN(v)) return null;   // \"nan\" bei fehlendem Sensorwert\n\nlet path = 'Temperature';\nif (msg.topic.endsWith('humidity/state')) path = 'Humidity';\nif (msg.topic.endsWith('level/state')) {\n    path = 'Level';\n    v = Math.min(100, Math.max(0, v));\n}\n\nconst out = [];\nif (!online) {\n    context.set('online', true);\n    out.push({ connected: true });\n}\nout.push({ payload: { [path]: Math.round(v * 10) / 10 } });\nnode.status({ fill: 'green', shape: 'dot', text: path + ' ' + v });\nreturn [out];",
+  "outputs": 1,
+  "timeout": 0,
+  "noerr": 0,
+  "initialize": "",
+  "finalize": "",
+  "libs": [],
+  "x": 700,
+  "y": 180,
+  "wires": [
+   [
+    "poessl_gefrier_virt"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gefrier_virt",
+  "type": "victron-virtual",
+  "z": "poessl_temp_tab",
+  "name": "Gefrierfach",
+  "outputs": 1,
+  "device": "temperature",
+  "default_values": false,
+  "temperature_type": 6,
+  "include_humidity": false,
+  "include_pressure": false,
+  "include_temp_battery": false,
+  "temp_battery_voltage": 3.3,
+  "start_disconnected": true,
+  "x": 940,
+  "y": 180,
+  "wires": [
+   []
+  ]
+ },
+ {
+  "id": "poessl_raum_mqtt0",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "room",
+  "topic": "esp-truma/sensor/room/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 300,
+  "wires": [
+   [
+    "poessl_raum_fn",
+    "poessl_raum_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_raum_mqtt1",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "room_humidity",
+  "topic": "esp-truma/sensor/room_humidity/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 340,
+  "wires": [
+   [
+    "poessl_raum_fn",
+    "poessl_raum_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_raum_trig",
+  "type": "trigger",
+  "z": "poessl_temp_tab",
+  "name": "2 h ohne Wert",
+  "op1": "",
+  "op2": "timeout",
+  "op1type": "nul",
+  "op2type": "str",
+  "duration": "2",
+  "extend": true,
+  "overrideDelay": false,
+  "units": "hr",
+  "reset": "",
+  "bytopic": "all",
+  "topic": "topic",
+  "outputs": 1,
+  "x": 470,
+  "y": 380,
+  "wires": [
+   [
+    "poessl_raum_fn"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_raum_fn",
+  "type": "function",
+  "z": "poessl_temp_tab",
+  "name": "→ Innenraum",
+  "func": "// Wert vom esp-truma auf das virtuelle Victron-Gerät geben.\n// Der esp-truma meldet nur bei Änderungen, nachts oft lange nichts.\n// Bleiben Werte 2 h aus (ESP aus, Sensor weg), meldet der Trigger\n// \"timeout\" und das Gerät wird offline gemeldet statt alte Werte zu zeigen.\nconst online = context.get('online') || false;\n\nif (msg.payload === 'timeout') {\n    if (!online) return null;\n    context.set('online', false);\n    node.status({ fill: 'grey', shape: 'ring', text: 'offline' });\n    return { connected: false };\n}\n\nlet v = parseFloat(msg.payload);\nif (isNaN(v)) return null;   // \"nan\" bei fehlendem Sensorwert\n\nlet path = 'Temperature';\nif (msg.topic.endsWith('humidity/state')) path = 'Humidity';\nif (msg.topic.endsWith('level/state')) {\n    path = 'Level';\n    v = Math.min(100, Math.max(0, v));\n}\n\nconst out = [];\nif (!online) {\n    context.set('online', true);\n    out.push({ connected: true });\n}\nout.push({ payload: { [path]: Math.round(v * 10) / 10 } });\nnode.status({ fill: 'green', shape: 'dot', text: path + ' ' + v });\nreturn [out];",
+  "outputs": 1,
+  "timeout": 0,
+  "noerr": 0,
+  "initialize": "",
+  "finalize": "",
+  "libs": [],
+  "x": 700,
+  "y": 300,
+  "wires": [
+   [
+    "poessl_raum_virt"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_raum_virt",
+  "type": "victron-virtual",
+  "z": "poessl_temp_tab",
+  "name": "Innenraum",
+  "outputs": 1,
+  "device": "temperature",
+  "default_values": false,
+  "temperature_type": 3,
+  "include_humidity": true,
+  "include_pressure": false,
+  "include_temp_battery": false,
+  "temp_battery_voltage": 3.3,
+  "start_disconnected": true,
+  "x": 940,
+  "y": 300,
+  "wires": [
+   []
+  ]
+ },
+ {
+  "id": "poessl_mp_mqtt0",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "multiplus",
+  "topic": "esp-truma/sensor/multiplus/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 460,
+  "wires": [
+   [
+    "poessl_mp_fn",
+    "poessl_mp_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_mp_trig",
+  "type": "trigger",
+  "z": "poessl_temp_tab",
+  "name": "2 h ohne Wert",
+  "op1": "",
+  "op2": "timeout",
+  "op1type": "nul",
+  "op2type": "str",
+  "duration": "2",
+  "extend": true,
+  "overrideDelay": false,
+  "units": "hr",
+  "reset": "",
+  "bytopic": "all",
+  "topic": "topic",
+  "outputs": 1,
+  "x": 470,
+  "y": 500,
+  "wires": [
+   [
+    "poessl_mp_fn"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_mp_fn",
+  "type": "function",
+  "z": "poessl_temp_tab",
+  "name": "→ Multiplus",
+  "func": "// Wert vom esp-truma auf das virtuelle Victron-Gerät geben.\n// Der esp-truma meldet nur bei Änderungen, nachts oft lange nichts.\n// Bleiben Werte 2 h aus (ESP aus, Sensor weg), meldet der Trigger\n// \"timeout\" und das Gerät wird offline gemeldet statt alte Werte zu zeigen.\nconst online = context.get('online') || false;\n\nif (msg.payload === 'timeout') {\n    if (!online) return null;\n    context.set('online', false);\n    node.status({ fill: 'grey', shape: 'ring', text: 'offline' });\n    return { connected: false };\n}\n\nlet v = parseFloat(msg.payload);\nif (isNaN(v)) return null;   // \"nan\" bei fehlendem Sensorwert\n\nlet path = 'Temperature';\nif (msg.topic.endsWith('humidity/state')) path = 'Humidity';\nif (msg.topic.endsWith('level/state')) {\n    path = 'Level';\n    v = Math.min(100, Math.max(0, v));\n}\n\nconst out = [];\nif (!online) {\n    context.set('online', true);\n    out.push({ connected: true });\n}\nout.push({ payload: { [path]: Math.round(v * 10) / 10 } });\nnode.status({ fill: 'green', shape: 'dot', text: path + ' ' + v });\nreturn [out];",
+  "outputs": 1,
+  "timeout": 0,
+  "noerr": 0,
+  "initialize": "",
+  "finalize": "",
+  "libs": [],
+  "x": 700,
+  "y": 460,
+  "wires": [
+   [
+    "poessl_mp_virt"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_mp_virt",
+  "type": "victron-virtual",
+  "z": "poessl_temp_tab",
+  "name": "Multiplus",
+  "outputs": 1,
+  "device": "temperature",
+  "default_values": false,
+  "temperature_type": 2,
+  "include_humidity": false,
+  "include_pressure": false,
+  "include_temp_battery": false,
+  "temp_battery_voltage": 3.3,
+  "start_disconnected": true,
+  "x": 940,
+  "y": 460,
+  "wires": [
+   []
+  ]
+ },
+ {
+  "id": "poessl_gas_mqtt0",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "propane_test_level",
+  "topic": "esp-truma/sensor/propane_test_level/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 600,
+  "wires": [
+   [
+    "poessl_gas_fn",
+    "poessl_gas_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gas_mqtt1",
+  "type": "mqtt in",
+  "z": "poessl_temp_tab",
+  "name": "propane_test_temp",
+  "topic": "esp-truma/sensor/propane_test_temp/state",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "poessl_cerbo_broker",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 640,
+  "wires": [
+   [
+    "poessl_gas_fn",
+    "poessl_gas_trig"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gas_trig",
+  "type": "trigger",
+  "z": "poessl_temp_tab",
+  "name": "2 h ohne Wert",
+  "op1": "",
+  "op2": "timeout",
+  "op1type": "nul",
+  "op2type": "str",
+  "duration": "2",
+  "extend": true,
+  "overrideDelay": false,
+  "units": "hr",
+  "reset": "",
+  "bytopic": "all",
+  "topic": "topic",
+  "outputs": 1,
+  "x": 470,
+  "y": 680,
+  "wires": [
+   [
+    "poessl_gas_fn"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gas_fn",
+  "type": "function",
+  "z": "poessl_temp_tab",
+  "name": "→ Gas",
+  "func": "// Wert vom esp-truma auf das virtuelle Victron-Gerät geben.\n// Der esp-truma meldet nur bei Änderungen, nachts oft lange nichts.\n// Bleiben Werte 2 h aus (ESP aus, Sensor weg), meldet der Trigger\n// \"timeout\" und das Gerät wird offline gemeldet statt alte Werte zu zeigen.\nconst online = context.get('online') || false;\n\nif (msg.payload === 'timeout') {\n    if (!online) return null;\n    context.set('online', false);\n    node.status({ fill: 'grey', shape: 'ring', text: 'offline' });\n    return { connected: false };\n}\n\nlet v = parseFloat(msg.payload);\nif (isNaN(v)) return null;   // \"nan\" bei fehlendem Sensorwert\n\nlet path = 'Temperature';\nif (msg.topic.endsWith('humidity/state')) path = 'Humidity';\nif (msg.topic.endsWith('level/state')) {\n    path = 'Level';\n    v = Math.min(100, Math.max(0, v));\n}\n\nconst out = [];\nif (!online) {\n    context.set('online', true);\n    out.push({ connected: true });\n}\nout.push({ payload: { [path]: Math.round(v * 10) / 10 } });\nnode.status({ fill: 'green', shape: 'dot', text: path + ' ' + v });\nreturn [out];",
+  "outputs": 1,
+  "timeout": 0,
+  "noerr": 0,
+  "initialize": "",
+  "finalize": "",
+  "libs": [],
+  "x": 700,
+  "y": 600,
+  "wires": [
+   [
+    "poessl_gas_virt"
+   ]
+  ]
+ },
+ {
+  "id": "poessl_gas_virt",
+  "type": "victron-virtual",
+  "z": "poessl_temp_tab",
+  "name": "Gas",
+  "outputs": 1,
+  "device": "tank",
+  "default_values": false,
+  "fluid_type": 8,
+  "tank_capacity": 0.021,
+  "include_tank_temperature": true,
+  "include_tank_battery": false,
+  "tank_battery_voltage": 3.3,
+  "start_disconnected": true,
+  "x": 940,
+  "y": 600,
+  "wires": [
+   []
+  ]
+ }
+]

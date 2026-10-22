@@ -1,0 +1,595 @@
+# =====================================================================
+# Home Assistant: Ersatz-Sensoren für die Strom-Seite des Pössl
+#
+# Jeder Sensor zeigt den Wert vom Cerbo, solange der verfügbar ist, und
+# fällt sonst auf den Wert des Fernmonitors zurück. Das Attribut "quelle"
+# zeigt, woher der aktuelle Wert stammt.
+#
+# Im Dashboard die bisherigen Cerbo-Entitäten durch diese Sensoren ersetzen.
+# Monitor-Werte werden nur verwendet, solange "Pössl Monitor aktuell" an ist,
+# die letzte Meldung also jünger als 2 h 15 min ist.
+# =====================================================================
+
+template:
+  - sensor:
+      - name: "Pössl Ladestand"
+        unique_id: possl_fallback_soc
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        # Drei Quellen in dieser Reihenfolge: Cerbo, Shunt über den Monitor,
+        # BMS über den Monitor. Der Shunt liefert erst nach seinem ersten
+        # Abgleich bei 100 % einen Ladestand, bis dahin springt das BMS ein.
+        # Vom Cerbo gibt es zwei mögliche Entitäten: die frühere "Batterie 1"
+        # und den Ladestand des Gesamtsystems. Es zählt, welche gerade liefert.
+        state: >
+          {% set cerbo1 = (states('sensor.victron_mqtt_battery_1_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set cerbo2 = (states('sensor.victron_mqtt_system_0_system_dc_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set shunt = states('sensor.possl_monitor_ladestand') %}
+          {% set bms = states('sensor.possl_monitor_bms_ladestand') %}
+          {{ cerbo1 if is_number(cerbo1) else
+             (cerbo2 if is_number(cerbo2) else
+             (shunt if is_number(shunt) else bms)) }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or is_number((states('sensor.victron_mqtt_system_0_system_dc_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on')
+                 and (is_number(states('sensor.possl_monitor_ladestand'))
+                      or is_number(states('sensor.possl_monitor_bms_ladestand')))) }}
+        attributes:
+          quelle: >
+            {% if is_number((states('sensor.victron_mqtt_battery_1_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+                  or is_number((states('sensor.victron_mqtt_system_0_system_dc_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) %}Cerbo
+            {% elif is_number(states('sensor.possl_monitor_ladestand')) %}Monitor (Shunt)
+            {% else %}Monitor (BMS){% endif %}
+          # Ändert sich mit jeder Meldung des Monitors. Dadurch entsteht auch
+          # dann ein neuer Messpunkt, wenn der Ladestand gleich geblieben ist.
+          # Die Bilanz-Sensoren unten brauchen das, sonst fehlen ihnen bei
+          # einem ruhenden Akku die Stützpunkte.
+          letzte_monitor_meldung: >
+            {{ states('sensor.possl_monitor_letzte_meldung') }}
+
+      - name: "Pössl Batteriespannung"
+        unique_id: possl_fallback_voltage
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_battery_1_battery_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_batteriespannung') }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_batteriespannung'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Der Monitor sendet keine Leistung, sie wird aus Spannung mal Strom
+      # berechnet. Vorzeichen wie bei Victron: positiv heißt Laden.
+      - name: "Pössl Batterieleistung"
+        unique_id: possl_fallback_battery_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_battery_279_battery_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% if is_number(cerbo) %}
+            {{ cerbo }}
+          {% else %}
+            {{ (states('sensor.possl_monitor_batteriespannung') | float(0)
+                * states('sensor.possl_monitor_batteriestrom') | float(0)) | round(0) }}
+          {% endif %}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_279_battery_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on')
+                 and is_number(states('sensor.possl_monitor_batteriespannung'))
+                 and is_number(states('sensor.possl_monitor_batteriestrom'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_279_battery_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Ausgabe in Minuten. Der Cerbo-Wert wird anhand seiner Einheit umgerechnet.
+      - name: "Pössl Restlaufzeit"
+        unique_id: possl_fallback_time_to_go
+        unit_of_measurement: "min"
+        device_class: duration
+        state: >
+          {% set e = 'sensor.victron_mqtt_battery_1_battery_time_to_go' %}
+          {% set cerbo = (states(e) if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% if is_number(cerbo) %}
+            {% set u = state_attr(e, 'unit_of_measurement') %}
+            {% set f = {'s': 1/60, 'min': 1, 'h': 60, 'd': 1440}.get(u, 1) %}
+            {{ (cerbo | float * f) | round(0) }}
+          {% else %}
+            {{ states('sensor.possl_monitor_restlaufzeit') }}
+          {% endif %}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_time_to_go') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_restlaufzeit'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_time_to_go') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Der Cerbo meldet die Summe aus Dach und Solartasche, der Monitor nur
+      # das Dach. Im Stand ist das dasselbe.
+      - name: "Pössl Solarleistung"
+        unique_id: possl_fallback_pv_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_solarleistung') }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_solarleistung'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Ausgabe in kWh. Liefert sensor.solarertrag Wh, wird umgerechnet.
+      # Cerbo und Monitor lesen denselben Tageszähler des MPPT. Nach einem
+      # Neustart meldet der Cerbo aber erst einmal 0, obwohl der Monitor schon
+      # einen Ertrag kennt. Deshalb gilt der höhere der beiden Werte. Den
+      # Monitorwert nur, wenn seine letzte Meldung von heute ist, sonst würde
+      # nach Mitternacht noch der Ertrag von gestern stehen bleiben.
+      - name: "Pössl Solarertrag"
+        unique_id: possl_fallback_yield_today
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state: >
+          {% set e = 'sensor.solarertrag' %}
+          {% set c = (states(e) if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set f = 0.001 if state_attr(e, 'unit_of_measurement') == 'Wh' else 1 %}
+          {% set cv = c | float * f if is_number(c) else none %}
+          {% set mo = states.sensor.possl_monitor_solarertrag_heute %}
+          {% set heute = mo is not none and as_local(mo.last_reported).date() == now().date() %}
+          {% set mv = mo.state | float if heute and is_number(mo.state) else none %}
+          {% set werte = [cv, mv] | reject('none') | list %}
+          {{ (werte | max) | round(2) if werte else none }}
+        availability: >
+          {% set mo = states.sensor.possl_monitor_solarertrag_heute %}
+          {{ is_number((states('sensor.solarertrag') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (mo is not none and is_number(mo.state)
+                 and as_local(mo.last_reported).date() == now().date()) }}
+        attributes:
+          quelle: >
+            {% set e = 'sensor.solarertrag' %}
+            {% set c = (states(e) if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+            {% set f = 0.001 if state_attr(e, 'unit_of_measurement') == 'Wh' else 1 %}
+            {% set mo = states.sensor.possl_monitor_solarertrag_heute %}
+            {% set heute = mo is not none and as_local(mo.last_reported).date() == now().date() %}
+            {% set mv = mo.state | float if heute and is_number(mo.state) else -1 %}
+            {{ 'Cerbo' if is_number(c) and c | float * f >= mv else 'Monitor' }}
+
+      # Derselbe Ertrag in Wh fürs Dashboard, weil kWh bei kleinen
+      # Wintererträgen nur 0,00 zeigt. Eigener Sensor statt geänderter Einheit,
+      # damit Home Assistant die alte Einheit nicht weiter anzeigt. Der Monitor
+      # liefert den Ertrag in Schritten von 10 Wh.
+      - name: "Pössl Solarertrag heute"
+        unique_id: possl_fallback_yield_today_wh
+        unit_of_measurement: "Wh"
+        device_class: energy
+        state: >
+          {{ (states('sensor.possl_solarertrag') | float(0) * 1000) | round(0) | int }}
+        availability: >
+          {{ is_number(states('sensor.possl_solarertrag')) }}
+
+      # Ladephase des Dachreglers: vom Cerbo (Zustand des Ladereglers), sonst
+      # vom Monitor. Beide liefern dieselben Phasen (Off, Bulk, Absorption,
+      # Float), nur unterschiedlich geschrieben. Einheitlich übersetzt;
+      # unbekannte Werte bleiben, wie sie sind.
+      - name: "Pössl Dachsolar Status"
+        unique_id: possl_fallback_mppt_state
+        state: >
+          {% set leer = ['unavailable', 'unknown', 'none', 'None', ''] %}
+          {% set cerbo = (states('sensor.victron_mqtt_solarcharger_278_solarcharger_state') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set roh = cerbo if cerbo not in leer else states('sensor.possl_monitor_laderegler_zustand') %}
+          {% set text = {
+               'off': 'Aus',
+               'low_power': 'Aus',
+               'starting_up': 'Startet',
+               'bulk': 'Bulk',
+               'absorption': 'Absorption',
+               'repeated_absorption': 'Absorption',
+               'float': 'Float',
+               'storage': 'Erhaltung',
+               'equalize': 'Ausgleichsladung',
+               'auto_equalize': 'Ausgleichsladung',
+               'external_control': 'Fremdgesteuert',
+               'fault': 'Fehler'} %}
+          {{ text.get(roh | lower | replace(' ', '_'), roh) }}
+        availability: >
+          {% set leer = ['unavailable', 'unknown', 'none', 'None', ''] %}
+          {{ (states('sensor.victron_mqtt_solarcharger_278_solarcharger_state') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') not in leer
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and states('sensor.possl_monitor_laderegler_zustand') not in leer) }}
+        attributes:
+          quelle: >
+            {% set leer = ['unavailable', 'unknown', 'none', 'None', ''] %}
+            {{ 'Cerbo' if (states('sensor.victron_mqtt_solarcharger_278_solarcharger_state') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') not in leer else 'Monitor' }}
+
+      # Zellspannungen: vom Cerbo, solange er am BMS hängt, sonst vom Monitor.
+      - name: "Pössl Zelle 1"
+        unique_id: possl_fallback_cell1
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_battery_1_battery_cell_1_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_zelle_1') }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_cell_1_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_zelle_1'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_cell_1_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Zelle 2"
+        unique_id: possl_fallback_cell2
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_battery_1_battery_cell_2_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_zelle_2') }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_cell_2_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_zelle_2'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_cell_2_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Zelle 3"
+        unique_id: possl_fallback_cell3
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_battery_1_battery_cell_3_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_zelle_3') }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_cell_3_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_zelle_3'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_cell_3_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Zelle 4"
+        unique_id: possl_fallback_cell4
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.victron_mqtt_battery_1_battery_cell_4_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_zelle_4') }}
+        availability: >
+          {{ is_number((states('sensor.victron_mqtt_battery_1_battery_cell_4_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_zelle_4'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_cell_4_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Abstand zwischen der höchsten und der niedrigsten Zelle in Millivolt.
+      # Bei einem gesunden Akku bleibt das im Ruhezustand im zweistelligen
+      # Bereich; ein dauerhaft wachsender Wert deutet auf eine schwache Zelle.
+      - name: "Pössl Zellabweichung"
+        unique_id: possl_fallback_cell_delta
+        unit_of_measurement: "mV"
+        state_class: measurement
+        icon: mdi:arrow-expand-vertical
+        state: >
+          {% set z = [states('sensor.possl_zelle_1') | float(0),
+                      states('sensor.possl_zelle_2') | float(0),
+                      states('sensor.possl_zelle_3') | float(0),
+                      states('sensor.possl_zelle_4') | float(0)] %}
+          {{ ((z | max - z | min) * 1000) | round(0) | int }}
+        availability: >
+          {{ is_number(states('sensor.possl_zelle_1'))
+             and is_number(states('sensor.possl_zelle_2'))
+             and is_number(states('sensor.possl_zelle_3'))
+             and is_number(states('sensor.possl_zelle_4')) }}
+
+      # Kühlschrank, Gefrierfach und Gas: live vom Cerbo, sonst vom Monitor.
+      # Auf dem Cerbo kommen die Werte als virtuelle Geräte aus Node-RED
+      # (Flow "esp-truma → Cerbo").
+      - name: "Pössl Kühlschrank"
+        unique_id: possl_fallback_fridge
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.kuhlschrank_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_kuhlschrank_temperatur') }}
+        availability: >
+          {{ is_number((states('sensor.kuhlschrank_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_kuhlschrank_temperatur'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.kuhlschrank_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Gefrierfach"
+        unique_id: possl_fallback_freezer
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.gefrierfach_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_gefrierfach_temperatur') }}
+        availability: >
+          {{ is_number((states('sensor.gefrierfach_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on') and is_number(states('sensor.possl_monitor_gefrierfach_temperatur'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.gefrierfach_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Gas"
+        unique_id: possl_fallback_gas
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:propane-tank
+        state: >
+          {% set cerbo = (states('sensor.gas_fullstand') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {{ cerbo if is_number(cerbo) else states('sensor.possl_monitor_gas_fullstand') }}
+        availability: >
+          {{ is_number((states('sensor.gas_fullstand') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or is_number(states('sensor.possl_monitor_gas_fullstand')) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.gas_fullstand') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Innenraum und Technikbereich: live vom Cerbo, sonst vom Monitor.
+      - name: "Pössl Innenraum"
+        unique_id: possl_fallback_room
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:home-thermometer-outline
+        state: >
+          {% set cerbo = (states('sensor.innenraum_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set v = cerbo if is_number(cerbo) else states('sensor.possl_monitor_innenraum_temperatur') %}
+          {{ v | float | round(1) }}
+        availability: >
+          {{ is_number((states('sensor.innenraum_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or is_number(states('sensor.possl_monitor_innenraum_temperatur')) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.innenraum_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Innenraum Luftfeuchte"
+        unique_id: possl_fallback_room_humidity
+        unit_of_measurement: "%"
+        device_class: humidity
+        state_class: measurement
+        icon: mdi:water-percent
+        state: >
+          {% set cerbo = (states('sensor.innenraum_luftfeuchte') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set v = cerbo if is_number(cerbo) else states('sensor.possl_monitor_innenraum_luftfeuchte') %}
+          {{ v | float | round(0) | int }}
+        availability: >
+          {{ is_number((states('sensor.innenraum_luftfeuchte') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or is_number(states('sensor.possl_monitor_innenraum_luftfeuchte')) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.innenraum_luftfeuchte') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      - name: "Pössl Technikbereich"
+        unique_id: possl_fallback_technik
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:thermometer-lines
+        state: >
+          {% set cerbo = (states('sensor.multiplus_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% set v = cerbo if is_number(cerbo) else states('sensor.possl_monitor_multiplus_temperatur') %}
+          {{ v | float | round(1) }}
+        availability: >
+          {{ is_number((states('sensor.multiplus_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable'))
+             or is_number(states('sensor.possl_monitor_multiplus_temperatur')) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.multiplus_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Solarprognose von Forecast.Solar, einheitlich in Wh. Sie hängt nur vom
+      # Wetter ab und funktioniert deshalb auch bei ausgeschaltetem Cerbo.
+      # Die Einheit der Quelle wird beachtet, egal ob sie in den
+      # Entitätseinstellungen auf Wh oder kWh steht.
+      - name: "Pössl Solarprognose heute"
+        unique_id: possl_solar_forecast_today
+        unit_of_measurement: "Wh"
+        device_class: energy
+        state: >
+          {% set e = 'sensor.energy_production_today' %}
+          {% set f = 1 if state_attr(e, 'unit_of_measurement') == 'Wh' else 1000 %}
+          {{ (states(e) | float(0) * f) | round(0) | int }}
+        availability: >
+          {{ is_number(states('sensor.energy_production_today')) }}
+
+      - name: "Pössl Solarprognose morgen"
+        unique_id: possl_solar_forecast_tomorrow
+        unit_of_measurement: "Wh"
+        device_class: energy
+        state: >
+          {% set e = 'sensor.energy_production_tomorrow' %}
+          {% set f = 1 if state_attr(e, 'unit_of_measurement') == 'Wh' else 1000 %}
+          {{ (states(e) | float(0) * f) | round(0) | int }}
+        availability: >
+          {{ is_number(states('sensor.energy_production_tomorrow')) }}
+
+      - name: "Pössl Solarprognose Rest"
+        unique_id: possl_solar_forecast_remaining
+        unit_of_measurement: "Wh"
+        device_class: energy
+        state: >
+          {% set e = 'sensor.energy_production_today_remaining' %}
+          {% set f = 1 if state_attr(e, 'unit_of_measurement') == 'Wh' else 1000 %}
+          {{ (states(e) | float(0) * f) | round(0) | int }}
+        availability: >
+          {{ is_number(states('sensor.energy_production_today_remaining')) }}
+
+      # Ertrag gegen Prognose: Wie viel Prozent dessen, was laut Wetter bis
+      # jetzt hätte kommen sollen, hat das Dach geliefert? Deutlich unter 100
+      # heißt Schatten, Laub oder Schnee auf dem Modul.
+      # Nur aussagekräftig, solange der Regler alles abnimmt (Bulk bzw.
+      # MPPT aktiv). Bei vollem Akku drosselt er, dann bleibt der Wert leer.
+      # Leer bleibt er auch, solange die Prognose bis jetzt unter 50 Wh liegt.
+      - name: "Pössl Solar Ertrag gegen Prognose"
+        unique_id: possl_solar_performance
+        unit_of_measurement: "%"
+        icon: mdi:solar-power-variant-outline
+        state: >
+          {% set erwartet = states('sensor.possl_solarprognose_heute') | float(0)
+                            - states('sensor.possl_solarprognose_rest') | float(0) %}
+          {{ (states('sensor.possl_solarertrag_heute') | float(0) / erwartet * 100) | round(0) | int
+             if erwartet > 0 else 0 }}
+        availability: >
+          {% set erwartet = states('sensor.possl_solarprognose_heute') | float(0)
+                            - states('sensor.possl_solarprognose_rest') | float(0) %}
+          {{ is_number(states('sensor.possl_solarertrag_heute'))
+             and is_number(states('sensor.possl_solarprognose_heute'))
+             and is_number(states('sensor.possl_solarprognose_rest'))
+             and erwartet >= 50
+             and states('sensor.possl_dachsolar_status') | lower in ['bulk', 'mppt active', 'mppt aktiv'] }}
+
+      # Leistung am Lastausgang des Ladereglers. Läuft der Cerbo, gilt dein
+      # bisheriger Sensor, sonst rechnet der Monitor: Strom mal Spannung.
+      # Ob der Cerbo läuft, wird an seiner Solarleistung erkannt.
+      - name: "Pössl Lastausgang Leistung"
+        unique_id: possl_fallback_load_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set cerbo = (states('sensor.nettoleistung_lastausgang') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
+          {% if is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) and is_number(cerbo) %}
+            {{ cerbo | float | round(0) | int }}
+          {% else %}
+            {{ (states('sensor.possl_monitor_lastausgang_strom') | float(0)
+                * states('sensor.possl_monitor_batteriespannung') | float(0)) | round(0) | int }}
+          {% endif %}
+        availability: >
+          {{ (is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) and is_number((states('sensor.nettoleistung_lastausgang') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')))
+             or (is_state('binary_sensor.possl_monitor_aktuell', 'on')
+                 and is_number(states('sensor.possl_monitor_lastausgang_strom'))
+                 and is_number(states('sensor.possl_monitor_batteriespannung'))) }}
+        attributes:
+          quelle: >
+            {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) and is_number((states('sensor.nettoleistung_lastausgang') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
+
+      # Zeit bis zur nächsten Meldung als Text, minutengenau und mit Uhrzeit.
+      # Die eingebaute Anzeige rundet ab einer Stunde auf volle Stunden.
+      - name: "Pössl Nächste Meldung"
+        unique_id: possl_next_due_text
+        icon: mdi:timer-sand
+        state: >
+          {% set t = states('sensor.possl_monitor_nachste_meldung') | as_datetime(none) %}
+          {% if t is none %}
+            unbekannt
+          {% else %}
+            {% set m = ((t - now()).total_seconds() / 60) | round(0) | int %}
+            {% set uhr = (t | as_local).strftime('%H:%M') %}
+            {% if m < 0 %}
+              überfällig seit {{ -m }} min
+            {% elif m < 60 %}
+              in {{ m }} min ({{ uhr }})
+            {% else %}
+              in {{ m // 60 }} h {{ '%02d' | format(m % 60) }} min ({{ uhr }})
+            {% endif %}
+          {% endif %}
+
+  # An, sobald am Lastausgang mindestens 1 W fließt.
+  - binary_sensor:
+      # Liefert der Cerbo gerade live? Ja, wenn sich mindestens ein Wert der
+      # Victron-Integration in den letzten 15 Minuten tatsächlich verändert
+      # hat. Die Integration schreibt nach dem Ausschalten die alten Werte
+      # weiter regelmäßig neu, deshalb zählt nur eine echte Änderung
+      # (last_changed), nicht jede Meldung. Bei laufendem Cerbo schwanken
+      # Leistung und Ströme ständig. Alle Ersatzsensoren nehmen Cerbo-Werte
+      # nur, solange dieser Sensor an ist. Das Dashboard blendet dann die
+      # Meldungen des Fernmonitors aus.
+      - name: "Pössl Cerbo live"
+        unique_id: possl_cerbo_live
+        device_class: connectivity
+        state: >
+          {% set t = states.sensor
+               | selectattr('entity_id', 'match', 'sensor\\.victron_mqtt_')
+               | rejectattr('state', 'in', ['unavailable', 'unknown'])
+               | map(attribute='last_changed') | list %}
+          {{ t | count > 0 and (now() - t | max).total_seconds() < 900 }}
+
+      - name: "Pössl Lastausgang aktiv"
+        unique_id: possl_fallback_load_active
+        device_class: power
+        state: >
+          {{ states('sensor.possl_lastausgang_leistung') | float(0) >= 1 }}
+        availability: >
+          {{ is_number(states('sensor.possl_lastausgang_leistung')) }}
+
+      # Läuft die Kühlung? Zwei Bedingungen zusammen:
+      # - deutlich kälter als der Innenraum: Im Herbst und Winter kühlt der
+      #   geparkte Camper nachts von selbst ab, dann sind beide gleich kalt.
+      # - und absolut kalt (Kühlschrank unter 8 °C, Gefrierfach unter -5 °C):
+      #   Heizt sich der Innenraum tagsüber durch Sonne schnell auf, hinkt der
+      #   geschlossene Kühlschrank hinterher und ist ein paar Grad kälter,
+      #   obwohl er aus ist (Fehlalarm vom 14.10.2026).
+      # Nach dem Abschalten bleibt der Zustand noch 12 Stunden an, damit die
+      # Warnung "zu warm" auch beim langsamen Erwärmen greift.
+      - name: "Pössl Kühlschrank läuft"
+        unique_id: possl_fridge_running
+        icon: mdi:fridge-outline
+        state: >
+          {% set k = states('sensor.possl_kuhlschrank') | float(99) %}
+          {{ k < 8 and k < states('sensor.possl_innenraum') | float(-99) - 4 }}
+        delay_off:
+          hours: 12
+        availability: >
+          {{ is_number(states('sensor.possl_kuhlschrank'))
+             and is_number(states('sensor.possl_innenraum')) }}
+
+      - name: "Pössl Gefrierfach läuft"
+        unique_id: possl_freezer_running
+        icon: mdi:snowflake
+        state: >
+          {% set g = states('sensor.possl_gefrierfach') | float(99) %}
+          {{ g < -5 and g < states('sensor.possl_innenraum') | float(-99) - 10 }}
+        delay_off:
+          hours: 12
+        availability: >
+          {{ is_number(states('sensor.possl_gefrierfach'))
+             and is_number(states('sensor.possl_innenraum')) }}
+
+# ---------------------------------------------------------------------
+# Bilanz: Um wie viele Prozentpunkte hat sich der Ladestand verändert?
+# Positiv heißt, der Akku hat gewonnen. Solange noch keine vollen 24 Stunden
+# an Messpunkten vorliegen, nennt das Dashboard die tatsächlich abgedeckte
+# Zeit. Die 7-Tage-Bilanz zeigt es erst, wenn eine Woche Daten da ist.
+# ---------------------------------------------------------------------
+sensor:
+  - platform: statistics
+    name: "Pössl Bilanz 24 Stunden"
+    unique_id: possl_soc_change_24h
+    entity_id: sensor.possl_ladestand
+    state_characteristic: change
+    max_age:
+      hours: 24
+    precision: 0
+
+  - platform: statistics
+    name: "Pössl Bilanz 7 Tage"
+    unique_id: possl_soc_change_7d
+    entity_id: sensor.possl_ladestand
+    state_characteristic: change
+    max_age:
+      days: 7
+    precision: 0
+
+  # Wie lange war der Lastausgang heute aktiv? Der Monitor sieht nur
+  # Momentaufnahmen, die Dauer ist deshalb auf den Meldetakt genau:
+  # tagsüber 30 Minuten, nachts 2 Stunden.
+  - platform: history_stats
+    name: "Pössl Lastausgang Einschaltdauer heute"
+    unique_id: possl_load_on_today
+    entity_id: binary_sensor.possl_lastausgang_aktiv
+    state: "on"
+    type: time
+    start: "{{ today_at() }}"
+    end: "{{ now() }}"

@@ -1,0 +1,505 @@
+# =====================================================================
+# Pössl: Ansicht "Strom"
+#
+# Nur noch Elektrik: Aufbaubatterie, Energiefluss, Solar, Starterbatterie.
+# Klima, Gas und die Knopfzellen der Funksensoren stehen auf der Seite
+# "Information". Die Seite funktioniert mit laufendem Cerbo (Live-Werte)
+# und ohne (Werte vom Fernmonitor); was gerade keinen Wert hat, blendet
+# sich aus.
+#
+# Einfügen: Ansicht bearbeiten > Stift an der Ansicht > "In YAML bearbeiten",
+# den ganzen Inhalt ersetzen.
+# Braucht aus HACS: power-flow-card-plus und card-mod (nur für die gefüllte
+# Batterie-Karte). Braucht die Pakete poessl_monitor.yaml und
+# poessl_fallback.yaml im aktuellen Stand.
+# =====================================================================
+title: Strom
+path: solar
+icon: mdi:battery-charging-40
+type: sections
+max_columns: 3
+subview: false
+badges:
+- type: entity
+  entity: sensor.possl_monitor_letzte_meldung
+  name: Letzte Meldung
+  icon: mdi:satellite-uplink
+  show_name: true
+  state_content: state
+  time_format: relative
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_cerbo_live
+    state_not: 'on'
+- type: entity
+  entity: sensor.possl_nachste_meldung
+  name: Nächste Meldung
+  icon: mdi:timer-sand
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_cerbo_live
+    state_not: 'on'
+- type: entity
+  entity: binary_sensor.possl_benachrichtigung_neu
+  name: Neue Meldung
+  icon: mdi:message-alert-outline
+  color: amber
+  show_name: true
+  show_state: false
+  tap_action:
+    action: navigate
+    navigation_path: /lovelace/info
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_benachrichtigung_neu
+    state: 'on'
+- type: entity
+  entity: sensor.possl_ladestand
+  name: Quelle
+  icon: mdi:source-branch
+  show_name: true
+  state_content: quelle
+- type: entity
+  entity: sensor.possl_dachsolar_status
+  name: Dachsolar
+  icon: mdi:solar-power-variant
+  show_name: true
+- type: entity
+  entity: binary_sensor.possl_monitor_aktuell
+  name: Monitor
+  icon: mdi:lan-disconnect
+  color: red
+  show_name: true
+  visibility:
+  - condition: state
+    entity: binary_sensor.possl_monitor_aktuell
+    state: 'off'
+- type: entity
+  entity: sensor.possl_monitor_starterbatterie
+  name: Starterbatterie niedrig
+  icon: mdi:car-battery
+  color: red
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_starterbatterie
+    below: 12.4
+- type: entity
+  entity: sensor.possl_monitor_ubersprungene_zyklen
+  name: Fehlstarts
+  icon: mdi:alert
+  color: red
+  show_name: true
+  visibility:
+  - condition: numeric_state
+    entity: sensor.possl_monitor_ubersprungene_zyklen
+    above: 0
+sections:
+- type: grid
+  cards:
+  - type: heading
+    heading: Aufbaubatterie
+    heading_style: title
+    icon: mdi:car-battery
+  - type: markdown
+    grid_options:
+      columns: full
+    content: |-
+      {% set soc = states('sensor.possl_ladestand') %}
+      {% set u = states('sensor.possl_batteriespannung') %}
+      {% set ps = states('sensor.possl_batterieleistung') %}
+      {% set p = ps | float(0) %}
+      {% set q = state_attr('sensor.possl_ladestand', 'quelle') or '' %}
+      {% set b1 = states('sensor.possl_bilanz_24_stunden') %}
+      {% set b7 = states('sensor.possl_bilanz_7_tage') %}
+      {% set r1 = state_attr('sensor.possl_bilanz_24_stunden', 'age_coverage_ratio') | float(0) %}
+      {% set h1 = (r1 * 24) | round(0) | int %}
+      {% set ok1 = is_number(b1) and h1 >= 1 %}
+      {% set ok7 = is_number(b7) and state_attr('sensor.possl_bilanz_7_tage', 'age_coverage_ratio') | float(0) >= 0.8 %}
+      # {{ soc | float | round(0) | int if is_number(soc) else '–' }} %
+
+      **{{ '%.2f' | format(u | float) | replace('.', ',') if is_number(u) else '–' }} V**{% if is_number(ps) %} &nbsp;·&nbsp; {% if p >= 2 %}lädt mit {{ p | round(0) | int }} W{% elif p <= -2 %}entlädt mit {{ p | abs | round(0) | int }} W{% else %}in Ruhe{% endif %}{% endif %}{% if 'BMS' in q %} &nbsp;·&nbsp; Ladestand laut BMS{% endif %}
+
+      {% if ok1 %}**{{ '24 Stunden' if r1 >= 0.8 else 'Letzte ' ~ h1 ~ ' Std.' }}:** {{ '±0' if b1 | float | round(0) == 0 else '%+d' | format(b1 | float | round(0) | int) }} %{% endif %}{% if ok1 and ok7 %} &nbsp;·&nbsp; {% endif %}{% if ok7 %}**7 Tage:** {{ '±0' if b7 | float | round(0) == 0 else '%+d' | format(b7 | float | round(0) | int) }} %{% endif %}{% if (ok1 or ok7) and 'BMS' in q %} &nbsp;·&nbsp; ungenau, solange das BMS die Quelle ist{% endif %}
+    card_mod:
+      style:
+        .: |
+          {% set s = states('sensor.possl_ladestand') %}
+          {% set soc = s | float(0) %}
+          {% if not is_number(s) %}
+            {% set c = '158, 158, 158' %}
+          {% elif soc >= 20 %}
+            {% set c = '76, 175, 80' %}
+          {% elif soc >= 10 %}
+            {% set c = '255, 167, 38' %}
+          {% else %}
+            {% set c = '239, 83, 80' %}
+          {% endif %}
+          ha-card {
+            background:
+              linear-gradient(90deg,
+                rgba({{ c }}, 0.36) 0%,
+                rgba({{ c }}, 0.20) {{ soc }}%,
+                rgba({{ c }}, 0.05) {{ soc }}%,
+                rgba({{ c }}, 0.05) 100%),
+              var(--ha-card-background, var(--card-background-color, #1c1c1c));
+            border: 1px solid rgba({{ c }}, 0.45);
+            overflow: hidden;
+          }
+        ha-markdown$: |
+          h1 {
+            font-size: 3.4em;
+            font-weight: 300;
+            line-height: 1.05;
+            letter-spacing: -0.02em;
+            margin: 4px 0 6px 0;
+          }
+          p {
+            margin: 0;
+            font-size: 1.05em;
+          }
+          p + p {
+            margin-top: 6px;
+            opacity: 0.85;
+          }
+  - type: tile
+    entity: sensor.possl_ladestand
+    name: Ladestand, letzte 7 Tage
+    icon: mdi:chart-bell-curve-cumulative
+    color: green
+    hide_state: true
+    features:
+    - type: trend-graph
+      hours_to_show: 168
+    grid_options:
+      columns: full
+  - type: tile
+    entity: sensor.possl_batteriespannung
+    name: Spannung
+    icon: mdi:sine-wave
+    color: light-blue
+    features:
+    - type: trend-graph
+      hours_to_show: 12
+    grid_options:
+      columns: 6
+  - type: tile
+    entity: sensor.possl_batterieleistung
+    name: Leistung
+    icon: mdi:lightning-bolt
+    color: amber
+    features:
+    - type: trend-graph
+      hours_to_show: 12
+    grid_options:
+      columns: 6
+  - type: tile
+    entity: sensor.possl_monitor_bms_temperatur
+    name: Temperatur
+    icon: mdi:thermometer
+    color: deep-orange
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: sensor.possl_monitor_bms_temperatur
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: sensor.possl_monitor_bms_ladezyklen
+    name: Ladezyklen
+    icon: mdi:battery-sync
+    color: blue-grey
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: sensor.possl_monitor_bms_ladezyklen
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: sensor.possl_restlaufzeit
+    name: Restlaufzeit
+    icon: mdi:timer-sand
+    color: teal
+    grid_options:
+      columns: full
+    visibility:
+    - condition: state
+      entity: sensor.possl_restlaufzeit
+      state_not:
+      - unavailable
+      - unknown
+- type: grid
+  cards:
+  - type: heading
+    heading: Energiefluss
+    heading_style: title
+    icon: mdi:transit-connection-variant
+  - type: custom:power-flow-card-plus
+    grid_options:
+      columns: full
+    entities:
+      battery:
+        entity: sensor.possl_batterieleistung
+        state_of_charge: sensor.possl_ladestand
+        invert_state: true
+      grid:
+        entity:
+          consumption: sensor.victron_mqtt_vebus_276_vebus_device_0_input_power_l1
+          production: sensor.victron_mqtt_vebus_276_vebus_device_0_output_power_l1
+        icon: mdi:power-socket-de
+        secondary_info: {}
+      solar:
+        entity: sensor.possl_solarleistung
+        display_zero_state: true
+        secondary_info: {}
+      home:
+        icon: mdi:rv-truck
+        name: Pössl
+        use_metadata: false
+        secondary_info:
+          entity: sensor.smartshunt_leistung
+        override_state: false
+        circle_animation: true
+        subtract_individual: false
+        entity: sensor.smartshunt_leistung
+      individual:
+      - entity: sensor.possl_lastausgang_leistung
+        secondary_info: {}
+        name: Lastausgang
+    clickable_entities: true
+    display_zero_lines:
+      mode: show
+      transparency: 50
+      grey_color:
+      - 189
+      - 189
+      - 189
+    use_new_flow_rate_model: true
+    w_decimals: 0
+    kw_decimals: 1
+    min_flow_rate: 0.75
+    max_flow_rate: 6
+    max_expected_power: 2000
+    min_expected_power: 0.01
+    watt_threshold: 1000
+    transparency_zero_lines: 0
+  - type: tile
+    entity: sensor.victron_mqtt_vebus_276_vebus_device_0_input_power_l1
+    name: Landstrom
+    icon: mdi:power-plug
+    color: purple
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: binary_sensor.possl_cerbo_live
+      state: 'on'
+    - condition: numeric_state
+      entity: sensor.victron_mqtt_vebus_276_vebus_device_0_input_power_l1
+      above: 5
+  - type: tile
+    entity: sensor.victron_mqtt_alternator_277_alternator_dc_power
+    name: Lichtmaschine
+    icon: mdi:engine
+    color: purple
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: binary_sensor.possl_cerbo_live
+      state: 'on'
+    - condition: numeric_state
+      entity: sensor.victron_mqtt_alternator_277_alternator_dc_power
+      above: 5
+  - type: heading
+    heading: Zellen
+    heading_style: title
+    icon: mdi:battery-sync-outline
+    badges:
+    - type: entity
+      entity: sensor.possl_zellabweichung
+      show_state: true
+      show_icon: true
+  - type: tile
+    entity: sensor.possl_zelle_1
+    name: Zelle 1
+    icon: mdi:numeric-1-circle-outline
+    color: green
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_zelle_2
+    name: Zelle 2
+    icon: mdi:numeric-2-circle-outline
+    color: green
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_zelle_3
+    name: Zelle 3
+    icon: mdi:numeric-3-circle-outline
+    color: green
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_zelle_4
+    name: Zelle 4
+    icon: mdi:numeric-4-circle-outline
+    color: green
+    vertical: true
+    grid_options:
+      columns: 3
+- type: grid
+  cards:
+  - type: heading
+    heading: Solar
+    heading_style: title
+    icon: mdi:white-balance-sunny
+  - type: tile
+    entity: sensor.possl_solarleistung
+    name: Solarleistung
+    icon: mdi:solar-power
+    color: amber
+    features:
+    - type: trend-graph
+      hours_to_show: 24
+    grid_options:
+      columns: full
+  - type: tile
+    entity: sensor.possl_solarertrag_heute
+    name: Ist heute
+    icon: mdi:counter
+    color: amber
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_solarprognose_heute
+    name: Soll heute
+    icon: mdi:weather-partly-cloudy
+    color: orange
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_solarprognose_rest
+    name: Rest heute
+    icon: mdi:timer-sand
+    color: orange
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_solarprognose_morgen
+    name: Morgen
+    icon: mdi:weather-sunny-alert
+    color: orange
+    vertical: true
+    grid_options:
+      columns: 3
+  - type: tile
+    entity: sensor.possl_solarertrag_woche
+    name: Diese Woche
+    icon: mdi:calendar-week
+    color: amber
+    grid_options:
+      columns: 6
+  - type: tile
+    entity: sensor.possl_solarertrag_jahr
+    name: Dieses Jahr
+    icon: mdi:calendar-range
+    color: amber
+    grid_options:
+      columns: 6
+  - type: tile
+    entity: sensor.victron_mqtt_solarcharger_288_solarcharger_state
+    name: Solartasche
+    icon: mdi:solar-panel
+    color: amber
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: state
+      entity: binary_sensor.possl_cerbo_live
+      state: 'on'
+    - condition: state
+      entity: sensor.victron_mqtt_solarcharger_288_solarcharger_state
+      state_not:
+      - unavailable
+      - unknown
+  - type: tile
+    entity: sensor.possl_solar_ertrag_gegen_prognose
+    name: Ertrag gegen Prognose
+    icon: mdi:solar-power-variant-outline
+    color: amber
+    grid_options:
+      columns: full
+    visibility:
+    - condition: state
+      entity: sensor.possl_solar_ertrag_gegen_prognose
+      state_not:
+      - unavailable
+      - unknown
+  - type: heading
+    heading: Starterbatterie
+    heading_style: title
+    icon: mdi:car-battery
+  - type: tile
+    entity: sensor.DEINE_PANDORA_ID_battery_voltage
+    name: Starterbatterie
+    icon: mdi:car-battery
+    color: blue-grey
+    grid_options:
+      columns: full
+    features:
+    - type: trend-graph
+      hours_to_show: 168
+  - type: tile
+    entity: sensor.possl_lastausgang_leistung
+    name: Lastausgang
+    icon: mdi:car-battery
+    color: blue-grey
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: numeric_state
+      entity: sensor.possl_lastausgang_einschaltdauer_heute
+      above: 0
+  - type: tile
+    entity: sensor.possl_lastausgang_einschaltdauer_heute
+    name: Last aktiv heute
+    icon: mdi:timer-outline
+    color: blue-grey
+    grid_options:
+      columns: 6
+    visibility:
+    - condition: numeric_state
+      entity: sensor.possl_lastausgang_einschaltdauer_heute
+      above: 0
+  - type: heading
+    heading: Fernmonitor
+    heading_style: subtitle
+    icon: mdi:satellite-uplink
+    visibility:
+    - condition: numeric_state
+      entity: sensor.possl_monitor_ubersprungene_zyklen
+      above: 0
+  - type: tile
+    entity: sensor.possl_monitor_letzter_fehlstart
+    name: Letzter Fehlstart
+    icon: mdi:restart-alert
+    color: red
+    grid_options:
+      columns: full
+    visibility:
+    - condition: numeric_state
+      entity: sensor.possl_monitor_ubersprungene_zyklen
+      above: 0

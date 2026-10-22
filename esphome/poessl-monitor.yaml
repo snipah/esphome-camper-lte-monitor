@@ -1,0 +1,985 @@
+# =====================================================================
+# Pössl Batterie-Fernmonitor
+# LilyGO T-A7670E (ESP32-WROVER-E + A7670E LTE Cat-1), 1NCE-SIM
+#
+# Ablauf pro Zyklus:
+#   aufwachen -> Modem einschalten -> LTE -> WireGuard zur Fritz!Box
+#   -> Victron, Mopeka, Inkbird und das BMS per Bluetooth lesen
+#   -> ein JSON per HTTP an Home Assistant senden
+#   -> Modem aus -> Deep Sleep
+#
+# Flashen per USB (kein WLAN, kein OTA):
+#   esphome run poessl-monitor.yaml
+# =====================================================================
+
+substitutions:
+  # "true" = Testbetrieb: Gerät bleibt wach, Modem bleibt an, kein Deep Sleep.
+  stay_awake: "false"
+  # Sendeintervall in Minuten: normal und bei niedrigem Ladestand
+  sleep_normal_min: "30"
+  sleep_alert_min: "15"
+  soc_alert_threshold: "30"
+  # Nachts seltener senden, das spart Datenvolumen. Uhrzeiten als volle
+  # Stunde (Ortszeit). Bei niedrigem Ladestand gilt auch nachts der
+  # kurze Takt von oben.
+  sleep_night_min: "120"
+  night_start_hour: "22"
+  night_end_hour: "6"
+  # Bluetooth-Adresse des CBT-Power-BMS in der Aufbaubatterie
+  bms_mac: "AA:BB:CC:DD:EE:01"
+
+esphome:
+  name: poessl-monitor
+  friendly_name: Poessl Monitor
+  includes:
+    # Für esp_sntp_restart() im on_connect des Modems
+    - "<esp_sntp.h>"
+    # Für esp_reset_reason() in der Fehlstart-Sperre
+    - "<esp_system.h>"
+  on_boot:
+    priority: 600
+    then:
+      - script.execute: bms_guard
+      - script.execute: run_cycle
+  on_shutdown:
+    then:
+      # Läuft vor jedem Deep Sleep, auch wenn die Notbremse (run_duration) greift,
+      # und vor jedem Neustart.
+      #
+      # Bei 5-V-Speisung über VBUS trennt GPIO12 das Modem NICHT vom Strom
+      # (Schaltplan V1.4: VBUS und IO12 sind verodert). Abgeschaltet wird es
+      # deshalb per AT+CPOF, und zwar immer, egal wie der Zyklus endet.
+      #
+      # Ausnahme: Bei der Fehlstart-Sperre ist die Modem-Komponente noch
+      # nicht eingerichtet, AT+CPOF läuft dann ins Leere. Das Modem bleibt
+      # bis zum nächsten regulären Zyklus an.
+      #
+      # Danach die Steuerleitungen im Schlaf festhalten:
+      #   GPIO5 (Reset)  LOW, sonst startet das Modem beim Aufwachen durch
+      #                  einen Störimpuls von selbst.
+      #   GPIO4 (PWRKEY) LOW, damit der schwebende Pin das Modem im Schlaf
+      #                  nicht einschaltet.
+      - lambda: |-
+          // Laut A76XX-AT-Handbuch (V1.09) antwortet das Modem auf AT+CPOF
+          // spätestens nach 9 s mit OK, speichert seine Daten, meldet sich
+          // vom Netz ab und schaltet aus.
+          auto r = id(lte).send_at("AT+CPOF", 9000);
+          ESP_LOGI("sleep", "AT+CPOF: %s", r.success ? "OK" : "keine Antwort");
+          if (r.success) {
+            // Dem Modem Zeit zum Abmelden und Herunterfahren geben
+            delay(4000);
+          }
+          gpio_set_level(GPIO_NUM_4, 0);
+          gpio_set_level(GPIO_NUM_5, 0);
+          gpio_set_level(GPIO_NUM_12, 0);
+          gpio_hold_en(GPIO_NUM_4);
+          gpio_hold_en(GPIO_NUM_5);
+          gpio_deep_sleep_hold_en();
+
+esp32:
+  board: esp32dev
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # Die Modem-Komponente hat einzelne lange blockierende Aufrufe.
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "30"
+
+external_components:
+  # Modem-Komponente (PPP über UART). Noch nicht im offiziellen ESPHome,
+  # deshalb direkt aus dem Pull Request esphome/esphome#6721.
+  # Auf einen festen Commit genagelt (Stand des PR vom 26.09.2026), damit ein
+  # späterer Build nicht unbemerkt anderen Code zieht. Für ein Update den
+  # Commit hier bewusst ändern.
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome
+      ref: 7746f5d4833ce1d6b010e485ef56aceaf8b8038b
+    components: [modem, network]
+  - source: github://Fabian-Schmidt/esphome-victron_ble
+    refresh: 1d
+
+logger:
+  # Für die Inbetriebnahme DEBUG, später INFO.
+  level: DEBUG
+
+# ---------------------------------------------------------------------
+# Mobilfunk
+# ---------------------------------------------------------------------
+modem:
+  id: lte
+  tx_pin: GPIO26
+  rx_pin: GPIO27
+  baud_rate: 115200
+  # Der A7670E spricht den SIM7600-Befehlssatz. SIM7600 und SIM7670 erzeugen
+  # in der Komponente denselben Treiber. Falls er nicht synchronisiert,
+  # bleibt als Alternative nur GENERIC.
+  model: SIM7600
+  apn: !secret lte_apn
+  # Wird erst nach der Einschaltsequenz im Skript aktiviert.
+  enable_on_boot: false
+  # Länger als run_duration, damit immer der Deep Sleep gewinnt.
+  reboot_timeout: 10min
+  on_sync:
+    # Firmware-Revision des Modems ins Log schreiben. Für den A7670E-LNXY-UBL
+    # führt LilyGO eine Revision mit dem Fehler "Unable to open network".
+    - lambda: |-
+        auto r = id(lte).send_at("AT+SIMCOMATI", 3000);
+        ESP_LOGI("modem", "AT+SIMCOMATI: %s", r.c_str());
+  on_connect:
+    # SNTP startet schon beim Booten, also vor dem Netz, und wiederholt
+    # danach nur in einem groben Raster. Hier sofort neu anstoßen, damit
+    # nach einem Kaltstart die Zeit (und damit der Tunnel) schnell steht.
+    - lambda: |-
+        esp_sntp_restart();
+
+# ---------------------------------------------------------------------
+# Tunnel nach Hause
+# ---------------------------------------------------------------------
+time:
+  - platform: sntp
+    id: sntp_time
+    # Für den Nachttakt wird die Ortszeit gebraucht.
+    timezone: Europe/Berlin
+
+wireguard:
+  id: wg
+  time_id: sntp_time
+  address: !secret wg_address
+  # /24, damit das ganze Heimnetz über den Tunnel geroutet wird.
+  netmask: 255.255.255.0
+  private_key: !secret wg_private_key
+  peer_endpoint: !secret wg_peer_endpoint
+  peer_port: !secret wg_peer_port
+  peer_public_key: !secret wg_peer_public_key
+  peer_preshared_key: !secret wg_peer_preshared_key
+  # Nur das Heimnetz durch den Tunnel, alles andere bleibt draußen.
+  peer_allowed_ips:
+    - 192.168.0.0/24
+  # Kein Keepalive: Der Tunnel lebt nur wenige Sekunden pro Zyklus.
+  peer_persistent_keepalive: 0s
+  reboot_timeout: 0s
+  update_interval: 5s
+
+mdns:
+  disabled: true
+
+# ---------------------------------------------------------------------
+# Versand: eine HTTP-Meldung pro Zyklus an den Webhook von Home Assistant
+# ---------------------------------------------------------------------
+# Kein Broker dazwischen. Home Assistant ist durch den Tunnel direkt
+# erreichbar und bestätigt den Empfang mit dem Statuscode 200.
+#
+# Eintrag in der secrets.yaml (IP von Home Assistant einsetzen):
+#   ha_webhook_url: "http://192.168.0.X:8123/api/webhook/poessl-monitor-EIGENE-ZUFALLS-ID"
+http_request:
+  id: http_client
+  timeout: 10s
+  watchdog_timeout: 15s
+  verify_ssl: false
+
+# ---------------------------------------------------------------------
+# Fehlerzähler, im Flash gespeichert
+# ---------------------------------------------------------------------
+# Die Fehlstart-Sperre zählt hier übersprungene Zyklen und merkt sich den
+# letzten Reset-Grund. Beides geht mit der nächsten erfolgreichen Meldung
+# nach Hause und wird danach auf 0 gesetzt. Geschrieben wird nur bei einem
+# Fehlstart und bei der ersten Meldung danach, das Flash wird also geschont.
+globals:
+  # Geplante Schlafdauer in Minuten, wird in plan_sleep gesetzt.
+  - id: next_sleep_min
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: skipped_cycles
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: last_fault
+    type: int
+    restore_value: true
+    initial_value: '0'
+  # Befehl der zuletzt gültig empfangenen BMS-Antwort, -1 = noch keine.
+  # Darauf wartet die Abfrage, bevor sie den nächsten Befehl schickt.
+  - id: bms_last_cmd
+    type: int
+    restore_value: false
+    initial_value: '-1'
+  # Wird gesetzt, sobald die BMS-Abfrage Zellwerte geliefert hat.
+  - id: bms_done
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Shunt-Strom vor dem Modemstart, siehe run_cycle.
+  - id: idle_current
+    type: float
+    restore_value: false
+    initial_value: 'NAN'
+  # Wird gesetzt, wenn Home Assistant den Empfang der Meldung bestätigt hat.
+  - id: send_ok
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# ---------------------------------------------------------------------
+# Deep Sleep
+# ---------------------------------------------------------------------
+deep_sleep:
+  id: deep_sleep_ctrl
+  # Notbremse: Hängt der Zyklus (kein Netz, kein Tunnel), geht das Gerät
+  # nach dieser Zeit trotzdem schlafen. Die Wartezeiten im Skript summieren
+  # sich im schlechtesten Fall auf knapp 4 Minuten, deshalb 5 Minuten.
+  run_duration: 5min
+  sleep_duration: ${sleep_normal_min}min
+
+# ---------------------------------------------------------------------
+# Modem-Steuerleitungen des T-A7670
+# ---------------------------------------------------------------------
+switch:
+  # Versorgung des Modems (BOARD_POWERON_PIN). Direkt beim Start an.
+  - platform: gpio
+    id: modem_power
+    pin:
+      number: GPIO12
+      ignore_strapping_warning: true
+    restore_mode: ALWAYS_ON
+  # Reset, aktiv HIGH
+  - platform: gpio
+    id: modem_reset
+    pin:
+      number: GPIO5
+      ignore_strapping_warning: true
+    restore_mode: ALWAYS_OFF
+  # Einschalttaster des Modems
+  - platform: gpio
+    id: modem_pwrkey
+    pin: GPIO4
+    restore_mode: ALWAYS_OFF
+  # DTR auf LOW hält das Modem wach
+  - platform: gpio
+    id: modem_dtr
+    pin: GPIO25
+    restore_mode: ALWAYS_OFF
+
+# ---------------------------------------------------------------------
+# Victron per Bluetooth (Instant Readout)
+# ---------------------------------------------------------------------
+esp32_ble_tracker:
+  scan_parameters:
+    # Aktiv, damit auch Sensoren gehört werden, die ihre Messwerte erst in
+    # der Scan-Antwort mitschicken (Inkbird). Victron und Mopeka stört das nicht.
+    active: true
+    interval: 320ms
+    window: 300ms
+    # Solange die Verbindung zum BMS steht, nur noch kurz scannen. Sonst
+    # belegt der Scan das Funkmodul fast vollständig und die Verbindung
+    # verhungert (im ersten Test: Abbruch nach 11 s mit Grund 0x08, ohne
+    # dass das BMS je antworten konnte).
+    connection_scan_window: 30ms
+  on_ble_advertise:
+    # Wie der Bluetooth-Proxy von ESPHome: Vor dem Verbinden kurze
+    # Verbindungsintervalle für das BMS vorgeben (7,5 ms). Der normale
+    # ble_client setzt diese Werte von sich aus nicht. Im Test vom 08.10.2026
+    # war das Lesen der zwölf Dienste damit nach etwa 1 s fertig, ohne diese
+    # Werte kam es in 11 s nicht zum Ende. Das Zeitlimit steht auf 5 s statt 10 s wie
+    # beim Proxy: Ein toter Verbindungsversuch endet so schneller, und es
+    # bleibt Zeit für mehr Anläufe.
+    - mac_address: ${bms_mac}
+      then:
+        - lambda: |-
+            static bool gesetzt = false;
+            if (!gesetzt) {
+              uint64_t a = x.address_uint64();
+              esp_bd_addr_t bda = {(uint8_t) (a >> 40), (uint8_t) (a >> 32), (uint8_t) (a >> 24),
+                                   (uint8_t) (a >> 16), (uint8_t) (a >> 8), (uint8_t) a};
+              esp_err_t err = esp_ble_gap_set_prefer_conn_params(bda, 0x06, 0x06, 0, 500);
+              ESP_LOGI("bms", "Verbindungsparameter wie beim Proxy gesetzt: %s", err == ESP_OK ? "OK" : "Fehler");
+              gesetzt = true;
+            }
+
+victron_ble:
+  - id: smart_shunt
+    mac_address: !secret shunt_mac
+    bindkey: !secret shunt_bindkey
+  - id: smart_solar
+    mac_address: !secret mppt_mac
+    bindkey: !secret mppt_bindkey
+
+# ---------------------------------------------------------------------
+# BMS der Aufbaubatterie (CBT Power) per Bluetooth
+# ---------------------------------------------------------------------
+# Anders als Victron sendet das BMS seine Werte nicht von selbst, es muss
+# verbunden und abgefragt werden. Der Monitor verbindet sich einmal pro
+# Zyklus, sobald er das BMS sieht, fragt ab und gibt es sofort wieder frei.
+#
+# Das BMS nimmt nur eine Verbindung an. Hängt der Cerbo gerade dran, ist es
+# für den Monitor unsichtbar, die Zellwerte bleiben dann leer. Das ist so
+# gewollt, im Betrieb liefert der Cerbo die Werte.
+#
+# Protokoll (aus der Bibliothek aiobmsble, Modul cbtpwr_bms):
+#   Abfrage:  AA 55 <Befehl> 00 <Prüfsumme> 0A 0D   an FFE5/FFE9
+#   Antwort:  AA 55 <Befehl> <Länge> <Daten> <Prüfsumme> 0D 0A   von FFE0/FFE4
+#   Prüfsumme = Summe aus Befehl, Länge und Daten, unteres Byte
+# Heißt die Batterie im Bluetooth-Scan "VB...", spricht sie ein anderes
+# Protokoll (cbtpwr_vb_bms), dann passt diese Abfrage nicht.
+ble_client:
+  - id: bms_client
+    mac_address: ${bms_mac}
+    auto_connect: true
+    on_connect:
+      then:
+        - script.execute: query_bms
+    on_disconnect:
+      then:
+        # Laufende Abfrage beenden, damit die nächste Verbindung sauber
+        # von vorn beginnt.
+        - script.stop: query_bms
+        - script.stop: bms_request
+
+# Alle Sensoren nur mit id, also intern. Sie werden nicht einzeln
+# veröffentlicht, sondern gesammelt im Skript.
+sensor:
+  - platform: victron_ble
+    victron_ble_id: smart_shunt
+    id: shunt_soc
+    type: STATE_OF_CHARGE
+  - platform: victron_ble
+    victron_ble_id: smart_shunt
+    id: shunt_voltage
+    type: BATTERY_VOLTAGE
+  - platform: victron_ble
+    victron_ble_id: smart_shunt
+    id: shunt_current
+    type: BATTERY_CURRENT
+  - platform: victron_ble
+    victron_ble_id: smart_shunt
+    id: shunt_consumed_ah
+    type: CONSUMED_AH
+  - platform: victron_ble
+    victron_ble_id: smart_shunt
+    id: shunt_time_to_go
+    type: TIME_TO_GO
+  - platform: victron_ble
+    victron_ble_id: smart_shunt
+    id: shunt_starter_voltage
+    type: AUX_VOLTAGE
+
+  - platform: victron_ble
+    victron_ble_id: smart_solar
+    id: mppt_pv_power
+    type: PV_POWER
+  - platform: victron_ble
+    victron_ble_id: smart_solar
+    id: mppt_yield_today
+    type: YIELD_TODAY
+  - platform: victron_ble
+    victron_ble_id: smart_solar
+    id: mppt_battery_current
+    type: BATTERY_CURRENT
+  # Strom am Lastausgang des Ladereglers. Dort hängt der Erhaltungslader
+  # der Starterbatterie. Der Regler meldet in Schritten von 0,1 A.
+  - platform: victron_ble
+    victron_ble_id: smart_solar
+    id: mppt_load_current
+    type: LOAD_CURRENT
+
+  # Gasflasche (Mopeka Standard)
+  - platform: mopeka_std_check
+    mac_address: AA:BB:CC:DD:EE:02
+    # Dieselbe Kalibrierung wie im esp-truma (an der eigenen Flasche
+    # ausgemessen), damit Cerbo und Fernmonitor denselben Füllstand zeigen.
+    tank_type: CUSTOM
+    custom_distance_full: 290mm
+    custom_distance_empty: 28mm
+    propane_butane_mix: 20%
+    level:
+      id: gas_level
+      filters:
+        - clamp:
+            min_value: 0
+            max_value: 100
+    temperature:
+      id: gas_temp
+    battery_level:
+      id: gas_battery
+
+  # Inkbird-Thermometer: Innenraum und Technikbereich beim Multiplus
+  - platform: inkbird_ibsth1_mini
+    mac_address: AA:BB:CC:DD:EE:03
+    temperature:
+      id: room_temp
+    humidity:
+      id: room_humidity
+    battery_level:
+      id: room_battery
+
+  - platform: inkbird_ibsth1_mini
+    mac_address: AA:BB:CC:DD:EE:04
+    temperature:
+      id: multiplus_temp
+    battery_level:
+      id: multiplus_battery
+
+  # Kühlschrank. Der Sensor kann einen Außenfühler haben: Steckt er, liefert
+  # der Sensor nur dessen Wert, sonst den eingebauten. Gesendet wird der
+  # Wert, der vorhanden ist.
+  - platform: inkbird_ibsth1_mini
+    mac_address: AA:BB:CC:DD:EE:05
+    temperature:
+      id: fridge_temp_int
+    external_temperature:
+      id: fridge_temp_ext
+    battery_level:
+      id: fridge_battery
+
+  # Gefrierfach
+  - platform: inkbird_ibsth1_mini
+    mac_address: AA:BB:CC:DD:EE:06
+    temperature:
+      id: freezer_temp
+    battery_level:
+      id: freezer_battery
+
+  # Antworten des BMS. Jede Benachrichtigung enthält genau eine Antwort,
+  # das Lambda prüft sie und verteilt die Werte auf die Sensoren darunter.
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: bms_client
+    id: bms_rx
+    service_uuid: 'FFE0'
+    characteristic_uuid: 'FFE4'
+    notify: true
+    update_interval: never
+    lambda: |-
+      if (x.size() < 7 || x[0] != 0xAA || x[1] != 0x55) {
+        return NAN;
+      }
+      const size_t len = x[3];
+      if (x.size() != 7 + len) {
+        return NAN;
+      }
+      uint8_t crc = 0;
+      for (size_t i = 2; i < 4 + len; i++) {
+        crc += x[i];
+      }
+      if (crc != x[4 + len]) {
+        ESP_LOGW("bms", "Prüfsumme falsch bei Befehl 0x%02X", x[2]);
+        return NAN;
+      }
+      auto u16 = [&x](size_t pos) -> uint16_t {
+        return (uint16_t) (x[pos] | (x[pos + 1] << 8));
+      };
+      switch (x[2]) {
+        case 0x05:  // Antwort enthält Zellen 1 bis 5 in mV; der Akku hat vier, die fünfte bleibt ungenutzt
+          if (len >= 8) {
+            id(bms_cell1).publish_state(u16(4) / 1000.0f);
+            id(bms_cell2).publish_state(u16(6) / 1000.0f);
+            id(bms_cell3).publish_state(u16(8) / 1000.0f);
+            id(bms_cell4).publish_state(u16(10) / 1000.0f);
+          }
+          break;
+        case 0x0A:  // Ladestand des BMS in Prozent, ein Byte
+          if (len >= 1) {
+            id(bms_soc).publish_state(x[4]);
+          }
+          break;
+        case 0x09:  // Temperatur in °C, vorzeichenbehaftet
+          if (len >= 2) {
+            id(bms_temp).publish_state((int16_t) u16(4));
+          }
+          break;
+        case 0x15:  // Nennkapazität und Ladezyklen
+          if (len >= 4) {
+            id(bms_cycles).publish_state(u16(6));
+          }
+          break;
+        case 0x21:  // Fehlercode, 0 = kein Fehler
+          if (len >= 4) {
+            id(bms_fault).publish_state(
+                (uint32_t) x[4] | ((uint32_t) x[5] << 8) | ((uint32_t) x[6] << 16) | ((uint32_t) x[7] << 24));
+          }
+          break;
+        default:
+          break;
+      }
+      ESP_LOGD("bms", "Antwort auf Befehl 0x%02X, %u Datenbytes", x[2], (unsigned) len);
+      id(bms_last_cmd) = x[2];
+      return x[2];
+
+  - platform: template
+    id: bms_cell1
+    accuracy_decimals: 3
+  - platform: template
+    id: bms_cell2
+    accuracy_decimals: 3
+  - platform: template
+    id: bms_cell3
+    accuracy_decimals: 3
+  - platform: template
+    id: bms_cell4
+    accuracy_decimals: 3
+  - platform: template
+    id: bms_temp
+  - platform: template
+    id: bms_cycles
+  - platform: template
+    id: bms_fault
+  - platform: template
+    id: bms_soc
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: victron_ble
+    victron_ble_id: smart_solar
+    id: mppt_state
+    type: DEVICE_STATE
+
+# ---------------------------------------------------------------------
+# Ablaufsteuerung
+# ---------------------------------------------------------------------
+script:
+  # Einen Befehl ans BMS schicken und auf die passende Antwort warten.
+  # Wie in der Bibliothek der Home-Assistant-Integration: keine festen
+  # Pausen, sondern warten bis die Antwort da ist, sonst bis zu dreimal
+  # wiederholen.
+  #
+  # Geschrieben wird mit der Standard-Aktion von ESPHome. Sie merkt sich die
+  # Schreib-Characteristic beim Verbinden. Ein eigener Zugriff per
+  # get_characteristic() funktioniert hier NICHT: ESPHome gibt die Liste der
+  # Dienste direkt nach dem Verbinden wieder frei ("services released").
+  # Die Schreibart (mit Empfangsbestätigung) wählt die Aktion selbst, das
+  # BMS antwortet darauf (geprüft mit aiobmsble am 08.10.2026).
+  - id: bms_request
+    mode: single
+    parameters:
+      cmd: int
+    then:
+      - lambda: |-
+          id(bms_last_cmd) = -1;
+      - repeat:
+          count: 3
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(bms_last_cmd) != cmd;'
+                then:
+                  - ble_client.ble_write:
+                      id: bms_client
+                      service_uuid: 'FFE5'
+                      characteristic_uuid: 'FFE9'
+                      # AA 55 <Befehl> 00 <Prüfsumme = Befehl> 0A 0D
+                      value: !lambda |-
+                        return std::vector<uint8_t>{0xAA, 0x55, (uint8_t) cmd, 0x00, (uint8_t) cmd, 0x0A, 0x0D};
+                  - wait_until:
+                      condition:
+                        lambda: 'return id(bms_last_cmd) == cmd;'
+                      timeout: 1s
+      - if:
+          condition:
+            lambda: 'return id(bms_last_cmd) != cmd;'
+          then:
+            - logger.log:
+                level: WARN
+                format: "BMS: keine Antwort auf Befehl 0x%02X"
+                args: ['cmd']
+
+  # BMS abfragen, sobald die Verbindung steht, und danach wieder freigeben.
+  #
+  # Die Abfrage muss in den ersten Sekunden nach dem Verbinden laufen: In
+  # allen Tests riss die Verbindung rund 10 s nach dem Aufbau ab (Grund 0x08).
+  # Mit den kurzen Verbindungsintervallen ist das Lesen der Dienste nach etwa
+  # 1 s fertig, die vier Abfragen brauchen danach weniger als eine Sekunde.
+  - id: query_bms
+    mode: single
+    then:
+      # Kurz warten, bis die Benachrichtigungen abonniert sind.
+      - delay: 500ms
+      # Zellspannungen
+      - script.execute:
+          id: bms_request
+          cmd: 0x05
+      - script.wait: bms_request
+      - if:
+          condition:
+            lambda: 'return std::isnan(id(bms_cell1).state);'
+          then:
+            # Keine Zellwerte: Verbindung trennen. Der Monitor verbindet sich
+            # beim nächsten Werbepaket des BMS von selbst neu und fragt
+            # erneut ab, bis die Sicherung (bms_guard) die Versuche beendet.
+            - logger.log:
+                level: WARN
+                format: "BMS: keine Zellwerte, neuer Anlauf"
+            - ble_client.disconnect: bms_client
+          else:
+            # Ladestand des BMS
+            - script.execute:
+                id: bms_request
+                cmd: 0x0A
+            - script.wait: bms_request
+            # Temperatur
+            - script.execute:
+                id: bms_request
+                cmd: 0x09
+            - script.wait: bms_request
+            # Ladezyklen
+            - script.execute:
+                id: bms_request
+                cmd: 0x15
+            - script.wait: bms_request
+            # Fehlercode
+            - script.execute:
+                id: bms_request
+                cmd: 0x21
+            - script.wait: bms_request
+            - logger.log: "BMS: Abfrage erfolgreich"
+            # Verbindung trennen und für diesen Zyklus nicht neu aufbauen,
+            # damit das BMS für den Cerbo frei ist. Danach scannt der Monitor
+            # wieder mit vollem Fenster.
+            - lambda: |-
+                id(bms_done) = true;
+                id(bms_client).set_enabled(false);
+
+  # Sicherung: Kommt die BMS-Abfrage nicht zustande, die Verbindungsversuche
+  # nach 45 s beenden. Einzelne Fehlversuche sind bei diesem BMS normal, auch
+  # die Home-Assistant-Integration hatte regelmäßig Zeitüberläufe und versucht
+  # es mehrfach. Deshalb hier Zeit für mehrere Anläufe. Sonst würde der gedrosselte Scan den Rest des Zyklus
+  # über anhalten und die anderen Sensoren kämen zu kurz.
+  - id: bms_guard
+    mode: single
+    then:
+      - wait_until:
+          condition:
+            lambda: 'return id(bms_done);'
+          timeout: 45s
+      - if:
+          condition:
+            lambda: 'return !id(bms_done);'
+          then:
+            - logger.log:
+                level: WARN
+                format: "BMS: Abfrage nicht zustande gekommen, Verbindung wird aufgegeben"
+            - script.stop: query_bms
+            - script.stop: bms_request
+            - lambda: |-
+                id(bms_client).set_enabled(false);
+
+  - id: run_cycle
+    mode: single
+    then:
+      # Haltefunktion der Steuerleitungen aus dem letzten Schlaf lösen.
+      - lambda: |-
+          gpio_hold_dis(GPIO_NUM_4);
+          gpio_hold_dis(GPIO_NUM_5);
+          gpio_deep_sleep_hold_dis();
+          // Reset-Grund ins Log: 8 = Aufwachen aus Deep Sleep (Normalfall),
+          // 1 = Einschalten, 9 = Brownout, 4 = Absturz, 5 bis 7 = Watchdog
+          ESP_LOGI("boot", "Reset-Grund: %d", (int) esp_reset_reason());
+      - if:
+          condition:
+            lambda: 'return ${stay_awake};'
+          then:
+            - deep_sleep.prevent: deep_sleep_ctrl
+            - logger.log: "Testbetrieb: Deep Sleep ist abgeschaltet"
+
+      # Fehlstart-Sperre: Endete der letzte Lauf mit Brownout, Absturz oder
+      # Watchdog, würde ein sofortiger neuer Versuch leicht in eine
+      # Neustart-Schleife ohne Schlaf führen und die Batterie leeren. Dann
+      # das Modem gar nicht erst starten, sondern direkt schlafen gehen und
+      # es beim nächsten regulären Aufwachen wieder versuchen.
+      # Im Testbetrieb ist die Sperre aus, damit das Problem im Log sichtbar bleibt.
+      - if:
+          condition:
+            lambda: |-
+              if (${stay_awake}) {
+                return false;
+              }
+              switch (esp_reset_reason()) {
+                case ESP_RST_BROWNOUT:
+                case ESP_RST_PANIC:
+                case ESP_RST_INT_WDT:
+                case ESP_RST_TASK_WDT:
+                case ESP_RST_WDT:
+                  return true;
+                default:
+                  return false;
+              }
+          then:
+            - logger.log:
+                level: WARN
+                format: "Fehlstart-Sperre: Zyklus wird übersprungen"
+            # Zählen und sofort ins Flash schreiben, gleich danach wird geschlafen.
+            - lambda: |-
+                id(skipped_cycles) += 1;
+                id(last_fault) = (int) esp_reset_reason();
+                skipped_cycles->on_shutdown();
+                last_fault->on_shutdown();
+                global_preferences->sync();
+            - script.execute: go_to_sleep
+            - script.stop: run_cycle
+
+      # Ruhestrom messen, bevor das Modem startet. Später im Zyklus zieht der
+      # Monitor selbst gut 1 W (Modem, Funk), die Momentaufnahme wäre dann
+      # deutlich zu hoch. Der Shunt sendet etwa jede Sekunde. Enthalten ist
+      # nur noch der ESP32 mit laufendem Bluetooth-Scan (grob 0,5 W).
+      - wait_until:
+          condition:
+            lambda: 'return !std::isnan(id(shunt_current).state);'
+          timeout: 8s
+      - lambda: |-
+          id(idle_current) = id(shunt_current).state;
+          ESP_LOGI("shunt", "Strom vor Modemstart: %.3f A", id(idle_current));
+
+      # Einschaltsequenz nach den LilyGO-Beispielen
+      - switch.turn_on: modem_power
+      - delay: 500ms
+      - switch.turn_off: modem_reset
+      - delay: 100ms
+      - switch.turn_on: modem_reset
+      - delay: 2600ms
+      - switch.turn_off: modem_reset
+      - switch.turn_off: modem_dtr
+      - switch.turn_off: modem_pwrkey
+      - delay: 100ms
+      # Einschaltimpuls 1 s: so im LilyGO-Wiki und als Wiederholung in den
+      # LilyGO-Beispielen. Das Datenblatt verlangt typisch 50 ms zum
+      # Einschalten und mindestens 2,5 s zum Ausschalten, ein noch laufendes
+      # Modem wird also nicht versehentlich abgeschaltet.
+      - switch.turn_on: modem_pwrkey
+      - delay: 1000ms
+      - switch.turn_off: modem_pwrkey
+      # Dem Modem Zeit zum Hochfahren geben. Laut SIMCom-Datenblatt ist die
+      # serielle Schnittstelle typisch 11,2 s nach dem Einschalten bereit.
+      - delay: 12s
+      # Erst das BMS fertig abfragen, dann die Modem-Komponente starten. Deren
+      # Start blockiert im ersten Test (14.10.2026) zweimal je 20 s, in der
+      # Zeit verhungert Bluetooth und die BMS-Abfrage scheiterte. Die
+      # zusätzliche Wartezeit gibt dem Modem außerdem mehr Zeit zum Hochfahren;
+      # vielleicht entfallen dadurch die 20-s-Blockaden ganz.
+      - wait_until:
+          condition:
+            lambda: 'return id(bms_done);'
+          timeout: 30s
+      # Echo des Modems abschalten, bevor die Modem-Komponente startet.
+      # Ursache der zweimal 20 s Blockade im ersten Test: Die Komponente
+      # erkennt den Betriebsmodus, indem sie ein PPP-Testpaket schickt. Mit
+      # eingeschaltetem Echo (Werkseinstellung nach jedem Einschalten) schickt
+      # das Modem das Paket zurück, die Erkennung hält das für eine
+      # PPP-Antwort ("Autodetect mode: 2" = Datenmodus) und versucht 20 s lang,
+      # einen Datenmodus zu verlassen, in dem das Modem gar nicht ist. Ohne
+      # Echo antwortet das Modem erst auf das folgende "AT" und wird sofort als
+      # Befehlsmodus erkannt. Dauerhaft speichern (AT&W) lehnt der A7670E ab,
+      # deshalb in jedem Zyklus. Bis zu fünf Versuche, falls das Modem noch
+      # nicht bereit ist.
+      - lambda: |-
+          for (int i = 1; i <= 5; i++) {
+            auto r = id(lte).send_at("ATE0", 1000);
+            if (r) {
+              ESP_LOGI("modem", "Echo aus (Versuch %d)", i);
+              return;
+            }
+            delay(200);
+          }
+          ESP_LOGW("modem", "ATE0 ohne Antwort, Modem reagiert noch nicht");
+      - modem.enable
+
+      # Auf LTE und Tunnel warten
+      - wait_until:
+          condition:
+            wireguard.peer_online:
+          timeout: 150s
+
+      - if:
+          condition:
+            wireguard.peer_online:
+          then:
+            # Sicherstellen, dass der Shunt schon gehört wurde. Geprüft wird die
+            # Spannung: Der Ladestand fehlt, solange der Shunt nicht
+            # synchronisiert ist, und würde sonst jeden Zyklus aufhalten.
+            - wait_until:
+                condition:
+                  lambda: 'return !std::isnan(id(shunt_voltage).state);'
+                timeout: 20s
+            # Auch auf den Gassensor warten. Er meldet sich nur alle paar
+            # Sekunden und fehlte sonst in schnellen Zyklen (Meldung vom
+            # 08.10.2026, 10:16 Uhr). Ist die Flasche ausgebaut, kostet das
+            # pro Zyklus 15 s Wachzeit.
+            - wait_until:
+                condition:
+                  lambda: 'return !std::isnan(id(gas_level).state);'
+                timeout: 15s
+            # Und dass die BMS-Abfrage durch ist. Im Normalfall ist sie längst
+            # fertig, bevor das Netz steht, die Wartezeit greift dann nicht.
+            - wait_until:
+                condition:
+                  lambda: 'return !std::isnan(id(bms_cell1).state);'
+                timeout: 10s
+            # Senden per HTTP an den Webhook von Home Assistant. Antwortet der
+            # mit 200, ist die Meldung angekommen. Sonst ein zweiter Versuch.
+            - lambda: |-
+                id(send_ok) = false;
+            - repeat:
+                count: 2
+                then:
+                  - if:
+                      condition:
+                        lambda: 'return !id(send_ok);'
+                      then:
+                        - script.execute: plan_sleep
+                        - script.wait: plan_sleep
+                        - http_request.post:
+                            url: !secret ha_webhook_url
+                            request_headers:
+                              Content-Type: application/json
+                            json: |-
+                              root["ts"] = id(sntp_time).now().timestamp;
+                              root["soc"] = id(shunt_soc).state;
+                              root["voltage"] = id(shunt_voltage).state;
+                              // Strom vor dem Modemstart (siehe run_cycle), sonst der aktuelle
+                              root["current"] = std::isnan(id(idle_current)) ? id(shunt_current).state : id(idle_current);
+                              root["current_awake"] = id(shunt_current).state;
+                              root["consumed_ah"] = id(shunt_consumed_ah).state;
+                              root["time_to_go_min"] = id(shunt_time_to_go).state;
+                              root["starter_voltage"] = id(shunt_starter_voltage).state;
+                              root["pv_power"] = id(mppt_pv_power).state;
+                              root["yield_today_kwh"] = id(mppt_yield_today).state;
+                              root["mppt_current"] = id(mppt_battery_current).state;
+                              root["load_current"] = id(mppt_load_current).state;
+                              root["mppt_state"] = id(mppt_state).state;
+                              root["gas_level"] = id(gas_level).state;
+                              root["gas_temp"] = id(gas_temp).state;
+                              root["gas_battery"] = id(gas_battery).state;
+                              root["room_temp"] = id(room_temp).state;
+                              root["room_humidity"] = id(room_humidity).state;
+                              root["room_battery"] = id(room_battery).state;
+                              root["multiplus_temp"] = id(multiplus_temp).state;
+                              root["multiplus_battery"] = id(multiplus_battery).state;
+                              root["fridge_temp"] = std::isnan(id(fridge_temp_ext).state)
+                                  ? id(fridge_temp_int).state : id(fridge_temp_ext).state;
+                              root["fridge_battery"] = id(fridge_battery).state;
+                              root["freezer_temp"] = id(freezer_temp).state;
+                              root["freezer_battery"] = id(freezer_battery).state;
+                              root["cell1"] = id(bms_cell1).state;
+                              root["cell2"] = id(bms_cell2).state;
+                              root["cell3"] = id(bms_cell3).state;
+                              root["cell4"] = id(bms_cell4).state;
+                              root["bms_temp"] = id(bms_temp).state;
+                              root["bms_cycles"] = id(bms_cycles).state;
+                              root["bms_fault"] = id(bms_fault).state;
+                              root["bms_soc"] = id(bms_soc).state;
+                              // Übersprungene Zyklen seit der letzten Meldung und
+                              // letzter Reset-Grund (0 = keiner, 9 = Brownout,
+                              // 4 = Absturz, 5 bis 7 = Watchdog)
+                              root["skipped"] = id(skipped_cycles);
+                              root["fault"] = id(last_fault);
+                              // Geplante Schlafdauer und bisherige Wachzeit,
+                              // daraus rechnet Home Assistant die nächste Meldung.
+                              root["next_min"] = id(next_sleep_min);
+                              root["awake_s"] = (int) (millis() / 1000);
+                            on_response:
+                              then:
+                                - lambda: |-
+                                    id(send_ok) = (response->status_code == 200);
+                                    ESP_LOGI("senden", "Antwort von Home Assistant: HTTP %d", response->status_code);
+                            on_error:
+                              then:
+                                - logger.log:
+                                    level: WARN
+                                    format: "Senden: keine Antwort von Home Assistant"
+            - if:
+                condition:
+                  lambda: 'return id(send_ok);'
+                then:
+                  - logger.log: "Werte gesendet"
+                  # Fehlerzähler zurücksetzen, sie sind jetzt gemeldet.
+                  - lambda: |-
+                      if (id(skipped_cycles) != 0 || id(last_fault) != 0) {
+                        id(skipped_cycles) = 0;
+                        id(last_fault) = 0;
+                        skipped_cycles->on_shutdown();
+                        last_fault->on_shutdown();
+                        global_preferences->sync();
+                      }
+                else:
+                  - logger.log:
+                      level: WARN
+                      format: "Meldung nicht zugestellt"
+          else:
+            - logger.log:
+                level: WARN
+                format: "Kein Tunnel innerhalb der Wartezeit"
+
+      - script.execute: go_to_sleep
+
+  # Legt fest, wie lange nach diesem Zyklus geschlafen wird. Läuft vor dem
+  # Senden, damit Home Assistant die Zeit bis zur nächsten Meldung erfährt.
+  - id: plan_sleep
+    mode: single
+    then:
+      - lambda: |-
+          // Ladestand vom Shunt, ersatzweise vom BMS
+          float soc = id(shunt_soc).state;
+          if (std::isnan(soc)) {
+            soc = id(bms_soc).state;
+          }
+          if (!std::isnan(soc) && soc < ${soc_alert_threshold}) {
+            ESP_LOGI("schlaf", "Ladestand niedrig: nächster Schlaf ${sleep_alert_min} min");
+            id(next_sleep_min) = ${sleep_alert_min};
+            return;
+          }
+          // Nachts seltener senden. Ohne gültige Uhrzeit bleibt es
+          // beim normalen Takt.
+          auto now = id(sntp_time).now();
+          if (now.is_valid()) {
+            const int start = ${night_start_hour};
+            const int end = ${night_end_hour};
+            const bool night = (start > end)
+                ? (now.hour >= start || now.hour < end)
+                : (now.hour >= start && now.hour < end);
+            if (night) {
+              // Möglichst zum Ende der Nacht wieder aufwachen, aber
+              // nie kürzer schlafen als im normalen Takt.
+              const int until_end = ((end - now.hour + 24) % 24) * 60 - now.minute;
+              int mins = ${sleep_night_min};
+              if (until_end < mins) {
+                mins = until_end;
+              }
+              if (mins < ${sleep_normal_min}) {
+                mins = ${sleep_normal_min};
+              }
+              ESP_LOGI("schlaf", "Nacht (%02d:%02d): nächster Schlaf %d min", now.hour, now.minute, mins);
+              id(next_sleep_min) = mins;
+              return;
+            }
+          }
+          ESP_LOGI("schlaf", "Nächster Schlaf ${sleep_normal_min} min");
+          id(next_sleep_min) = ${sleep_normal_min};
+
+  - id: go_to_sleep
+    mode: single
+    then:
+      # Falls vorher nicht gesendet wurde (Fehlstart-Sperre), jetzt planen.
+      - if:
+          condition:
+            lambda: 'return id(next_sleep_min) <= 0;'
+          then:
+            - script.execute: plan_sleep
+            - script.wait: plan_sleep
+      - if:
+          condition:
+            lambda: 'return ${stay_awake};'
+          then:
+            - logger.log: "Testbetrieb: bleibe wach"
+          else:
+            # Das Modem wird in on_shutdown per AT+CPOF heruntergefahren,
+            # das gilt für diesen Weg genauso wie für die Notbremse.
+            # Bei niedrigem Ladestand früher wieder aufwachen.
+            - deep_sleep.enter:
+                id: deep_sleep_ctrl
+                sleep_duration: !lambda |-
+                  // Sicherung: nie mit 0 Minuten schlafen gehen, das wäre
+                  // eine Endlosschleife aus Aufwachen und Einschlafen.
+                  int mins = id(next_sleep_min);
+                  if (mins <= 0) {
+                    mins = ${sleep_normal_min};
+                  }
+                  return mins * 60 * 1000;
