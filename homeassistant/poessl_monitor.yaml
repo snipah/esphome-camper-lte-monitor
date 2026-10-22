@@ -1,18 +1,18 @@
 # =====================================================================
-# Home Assistant: Sensoren für den Pössl-Fernmonitor (Webhook-Fassung)
+# Home Assistant: sensors for the camper remote monitor (webhook version)
 #
-# Der Monitor schickt pro Zyklus ein JSON per HTTP an einen Webhook.
-# Es ist kein MQTT-Broker beteiligt. Jede eintreffende Meldung aktualisiert
-# alle Sensoren auf einmal.
+# The monitor sends one JSON per cycle via HTTP to a webhook.
+# No MQTT broker involved. Each incoming report updates
+# all sensors at once.
 #
-# Die Webhook-ID muss mit der Adresse in der secrets.yaml des Monitors
-# übereinstimmen (ha_webhook_url). Sie ist frei wählbar, sollte aber nicht
-# erratbar sein.
+# The webhook ID must match the URL in the monitor's secrets.yaml
+# (ha_webhook_url). It can be anything, but should not be
+# guessable.
 #
-# Die Sensoren behalten ihren letzten Wert, bis die nächste Meldung kommt.
-# Ob die Werte noch frisch sind, zeigt "Pössl Monitor aktuell": an, solange
-# die letzte Meldung jünger als 2 h 15 min ist. Die Ersatz-Sensoren fürs
-# Dashboard nutzen Monitor-Werte nur, solange dieser Sensor an ist.
+# The sensors keep their last value until the next report arrives.
+# "Pössl Monitor aktuell" shows whether the values are fresh: on as long
+# as the last report is younger than 2 h 15 min. The fallback sensors for
+# the dashboard only use monitor values while this sensor is on.
 # =====================================================================
 
 template:
@@ -85,8 +85,8 @@ template:
         device_class: current
         state_class: measurement
 
-      # Strom am Lastausgang des Ladereglers (Erhaltungslader Starterbatterie).
-      # Sendet die Firmware das Feld noch nicht, bleibt der Sensor unbekannt.
+      # Current on the charge controller's load output (starter battery maintenance charger).
+      # If the firmware does not send the field, the sensor stays unknown.
       - name: "Pössl Monitor Lastausgang Strom"
         unique_id: poessl_monitor_wh_load_current
         state: "{{ trigger.json.load_current | default(none) }}"
@@ -103,10 +103,10 @@ template:
         state: "{{ (trigger.json.ts | int(0)) | as_datetime | as_local }}"
         device_class: timestamp
 
-      # Erwarteter Zeitpunkt der nächsten Meldung: jetzt plus die gemeldete
-      # Schlafdauer plus die Zeit, die der Monitor vom Aufwachen bis zum
-      # Senden braucht. Sendet die Firmware die Felder noch nicht, wird mit
-      # 30 Minuten und 45 Sekunden gerechnet.
+      # Expected time of the next report: now plus the reported sleep time
+      # plus the time the monitor needs from waking up to sending.
+      # If the firmware does not send the fields, 30 minutes and 45 seconds
+      # are assumed.
       - name: "Pössl Monitor Nächste Meldung"
         unique_id: poessl_monitor_wh_next_due
         state: >
@@ -116,12 +116,12 @@ template:
         device_class: timestamp
 
       # ---------------------------------------------------------------
-      # Funksensoren (Gas, Innenraum, Technik, Kühlschrank, Gefrierfach):
-      # Erwischt der Monitor in einem Zyklus keinen Wert von einem Sensor,
-      # bleibt der letzte Wert bis zu sechs Stunden stehen, statt auf
-      # "Unbekannt" zu springen. Das Attribut "stand" nennt die Zeit der
-      # letzten echten Messung. Bleibt ein Sensor länger stumm, wird der
-      # Wert unbekannt, damit ein leerer Sensor nicht unbemerkt bleibt.
+      # Wireless sensors (gas, interior, technical area, fridge, freezer):
+      # if the monitor misses a value from a sensor in a cycle, the last
+      # value is kept for up to six hours instead of jumping to
+      # "unknown". The attribute "stand" holds the time of the last real
+      # measurement. If a sensor stays silent longer, the value becomes
+      # unknown so a dead sensor does not go unnoticed.
       # ---------------------------------------------------------------
       - name: "Pössl Monitor Gas Füllstand"
         unique_id: poessl_monitor_wh_gas_level
@@ -258,8 +258,8 @@ template:
             {% else %}{{ none }}{% endif %}
         state_class: measurement
 
-      # Kühlschrank und Gefrierfach. Sendet die Firmware die Felder noch
-      # nicht, bleiben die Sensoren unbekannt.
+      # Fridge and freezer. If the firmware does not send the fields,
+      # the sensors stay unknown.
       - name: "Pössl Monitor Kühlschrank Temperatur"
         unique_id: poessl_monitor_wh_fridge_temp
         state: >
@@ -372,8 +372,8 @@ template:
         unique_id: poessl_monitor_wh_bms_fault
         state: "{{ trigger.json.bms_fault }}"
 
-      # Ladestand, wie ihn das BMS selbst berechnet. Zusätzlich zum Wert des
-      # SmartShunt ("Pössl Monitor Ladestand").
+      # State of charge as calculated by the BMS itself. In addition to the
+      # SmartShunt value ("Pössl Monitor Ladestand").
       - name: "Pössl Monitor BMS Ladestand"
         unique_id: poessl_monitor_wh_bms_soc
         state: "{{ trigger.json.bms_soc | default(none) }}"
@@ -402,9 +402,9 @@ template:
           {% set t = states('sensor.possl_monitor_letzte_meldung') | as_datetime(none) %}
           {{ t is not none and (now() - t) < timedelta(minutes=135) }}
 
-  # Letzte verschickte Benachrichtigung, damit sie auch nach dem Wegwischen
-  # auf dem Handy nachzulesen ist. Das Skript possl_melden löst das Ereignis
-  # aus, der Sensor merkt sich Titel, Text und Zeitpunkt.
+  # Last notification sent, so it can still be read after swiping it
+  # away on the phone. The script possl_melden fires the event,
+  # the sensor stores title, text and time.
   - triggers:
       - trigger: event
         event_type: possl_meldung
@@ -416,15 +416,15 @@ template:
         attributes:
           text: "{{ trigger.event.data.message }}"
           zeit: "{{ now().isoformat() }}"
-          # Die letzten zehn Meldungen, neueste zuerst, für die Seite
-          # "Meldungen".
+          # The last ten messages, newest first, for the
+          # "Meldungen" (messages) page.
           verlauf: >
             {% set neu = [{'zeit': now().isoformat(), 'title': trigger.event.data.title, 'text': trigger.event.data.message}] %}
             {% set alt = (this.attributes.verlauf | default([])) if this else [] %}
             {{ (neu + (alt if alt is iterable and alt is not string else []))[:10] }}
 
-  # An, solange die letzte Benachrichtigung jünger als 24 Stunden ist.
-  # Die Dashboards zeigen in dieser Zeit die Plakette "Neue Meldung".
+  # On as long as the last notification is younger than 24 hours.
+  # The dashboards show the "Neue Meldung" (new message) badge during that time.
   - binary_sensor:
       - name: "Pössl Benachrichtigung neu"
         unique_id: possl_notification_recent
@@ -444,8 +444,8 @@ automation:
           title: "Pössl: Frostgefahr"
           message: "Innenraum {{ states('sensor.possl_monitor_innenraum_temperatur') }} °C"
 
-  # Nutzt den Ersatz-Sensor: Cerbo, sonst Shunt, sonst BMS. So greift der
-  # Alarm auch, solange der Shunt noch keinen Ladestand liefert.
+  # Uses the fallback sensor: Cerbo, otherwise shunt, otherwise BMS. So the
+  # alarm also works while the shunt does not provide a state of charge yet.
   - alias: "Pössl: Ladestand niedrig"
     triggers:
       - trigger: numeric_state
@@ -459,10 +459,10 @@ automation:
             Ladestand {{ states('sensor.possl_ladestand') }} %
             (Quelle: {{ state_attr('sensor.possl_ladestand', 'quelle') }})
 
-  # Rückversicherung über die Spannung. Der Shunt zählt sehr kleine Ströme
-  # nicht mit, der angezeigte Ladestand kann über Wochen ohne Vollladung
-  # deshalb etwas zu hoch liegen. Die Spannung lässt sich nicht täuschen:
-  # Unter 12,8 V in Ruhe ist ein LiFePO4-Akku weitgehend leer.
+  # Safety net via voltage. The shunt does not count very small currents,
+  # so after weeks without a full charge the displayed state of charge
+  # can be somewhat too high. The voltage can't be fooled:
+  # below 12.8 V at rest a LiFePO4 battery is largely empty.
   - alias: "Pössl: Batteriespannung niedrig"
     triggers:
       - trigger: numeric_state
@@ -479,10 +479,10 @@ automation:
             (aktuell {{ states('sensor.possl_batteriespannung') }} V,
             Ladestand laut Anzeige {{ states('sensor.possl_ladestand') }} %).
 
-  # Starterbatterie: warnt, wenn die Spannung zwei Stunden lang unter 12,4 V
-  # liegt, also bei etwa 75 % Ladung. Früh genug, um vor Frost nachzuladen;
-  # die Pandora-Alarmanlage zieht dauerhaft an dieser Batterie. Zwei Quellen, damit eine allein ausfallen darf: der Hilfseingang
-  # des SmartShunt über den Monitor und der Fahrzeugsensor.
+  # Starter battery: warns when the voltage stays below 12.4 V for two hours,
+  # i.e. at about 75 % charge. Early enough to recharge before frost;
+  # my car alarm (Pandora) draws from this battery permanently. Two sources so either may fail:
+  # the SmartShunt aux input via the monitor and the vehicle sensor.
   - alias: "Pössl: Starterbatterie niedrig"
     triggers:
       - trigger: numeric_state
@@ -504,9 +504,9 @@ automation:
 
   - alias: "Pössl: Monitor meldet sich nicht"
     triggers:
-      # Löst aus, sobald der Zeitstempel der letzten Meldung älter als
-      # 4 h 15 min ist. Das verträgt eine ausgefallene Meldung im Nachttakt
-      # (2 h). Ist der Sensor noch unbekannt, bleibt die Bedingung falsch.
+      # Fires as soon as the timestamp of the last report is older than
+      # 4 h 15 min. That tolerates one missed report at the night interval
+      # (2 h). If the sensor is still unknown, the condition stays false.
       - trigger: template
         value_template: >
           {{ now() - (states('sensor.possl_monitor_letzte_meldung')
@@ -523,9 +523,9 @@ automation:
         entity_id: sensor.possl_monitor_ubersprungene_zyklen
         above: 0
     actions:
-      # Kurz warten: Der Sensor "Letzter Fehlstart" kommt aus derselben
-      # Meldung, wird aber erst nach "Übersprungene Zyklen" aktualisiert.
-      # Ohne die Pause stünde im Text noch der alte Grund ("keiner").
+      # Wait briefly: the "Letzter Fehlstart" sensor comes from the same
+      # report but is only updated after "Übersprungene Zyklen".
+      # Without the pause the text would still show the old reason ("keiner").
       - delay: 5
       - action: script.possl_melden
         data:
@@ -534,9 +534,9 @@ automation:
             {{ states('sensor.possl_monitor_ubersprungene_zyklen') }} Zyklus/Zyklen
             übersprungen, Grund: {{ states('sensor.possl_monitor_letzter_fehlstart') }}.
 
-  # Jeden Sonntag um 18 Uhr eine Zusammenfassung. Sie ersetzt im Winter das
-  # tägliche Nachschauen und zeigt nebenbei, dass die ganze Kette noch läuft.
-  # Zum Testen: Automation öffnen und "Aktionen ausführen" wählen.
+  # Every Sunday at 18:00 a summary. In winter it replaces the daily
+  # check and shows along the way that the whole chain still works.
+  # To test: open the automation and choose "Run actions".
   - alias: "Pössl: Wochenbericht"
     triggers:
       - trigger: time
@@ -574,13 +574,13 @@ automation:
             Schwache Knopfzellen: {{ ns.schwach | join(', ') if ns.schwach else 'keine' }}
 
 # ---------------------------------------------------------------------
-# Eine Stelle für alle Benachrichtigungen. Sämtliche Automationen oben
-# rufen dieses Skript auf, es schickt jede Meldung an beide iPhones.
+# One place for all notifications. All automations above call this
+# script; it sends every message to both phones.
 #
-# Die beiden Dienstnamen sind aus den Gerätenamen abgeleitet ("HANDY_1",
-# "HANDY_2"). Ob sie genau so heißen, zeigt Entwicklerwerkzeuge >
-# Aktionen, wenn man dort notify.mobile_app eintippt. Stimmt ein Name nicht,
-# bekommt nur dieses eine Gerät nichts, das andere wird trotzdem bedient.
+# The two service names are derived from the device names ("HANDY_1",
+# "HANDY_2"). Check the exact names under Developer tools >
+# Actions by typing notify.mobile_app. If one name is wrong, only
+# that device gets nothing, the other one is still served.
 # ---------------------------------------------------------------------
 script:
   possl_melden:
@@ -592,7 +592,7 @@ script:
       message:
         description: Text der Meldung
     sequence:
-      # Text für das Dashboard festhalten
+      # Keep the text for the dashboard
       - event: possl_meldung
         event_data:
           title: "{{ title }}"
@@ -602,8 +602,8 @@ script:
         data:
           title: "{{ title }}"
           message: "{{ message }}"
-          # Ein Tipp auf die Mitteilung öffnet die Seite "Meldungen" mit dem
-          # vollen Text.
+          # Tapping the notification opens the "Meldungen" page with the
+          # full text.
           data:
             url: /lovelace/info
       - action: notify.mobile_app_HANDY_2
@@ -611,17 +611,17 @@ script:
         data:
           title: "{{ title }}"
           message: "{{ message }}"
-          # Ein Tipp auf die Mitteilung öffnet die Seite "Meldungen" mit dem
-          # vollen Text.
+          # Tapping the notification opens the "Meldungen" page with the
+          # full text.
           data:
             url: /lovelace/info
 
 # ---------------------------------------------------------------------
-# Zähler und Statistik für den Wochenbericht
+# Counters and statistics for the weekly report
 # ---------------------------------------------------------------------
-# Solarertrag des Dachs, aufsummiert aus dem Tageszähler des Ladereglers.
-# Die Woche beginnt montags. Der Jahreszähler zeigt im Frühjahr, was der
-# Winter gebracht hat.
+# Roof solar yield, summed up from the charge controller's daily counter.
+# The week starts on Monday. The yearly counter shows in spring what the
+# winter brought.
 utility_meter:
   possl_solarertrag_woche:
     name: "Pössl Solarertrag Woche"

@@ -1,17 +1,17 @@
 # =====================================================================
-# Pössl: Ansicht "Strom"
+# Camper: "Strom" (power) view
 #
-# Nur noch Elektrik: Aufbaubatterie, Energiefluss, Solar, Starterbatterie.
-# Klima, Gas und die Knopfzellen der Funksensoren stehen auf der Seite
-# "Information". Die Seite funktioniert mit laufendem Cerbo (Live-Werte)
-# und ohne (Werte vom Fernmonitor); was gerade keinen Wert hat, blendet
-# sich aus.
+# Electrics only: house battery, energy flow, solar, starter battery.
+# Climate, gas and the coin cells of the wireless sensors are on the
+# "Information" page. The page works with the Cerbo running (live values)
+# and without (values from the remote monitor); whatever has no value
+# right now is hidden.
 #
-# Einfügen: Ansicht bearbeiten > Stift an der Ansicht > "In YAML bearbeiten",
-# den ganzen Inhalt ersetzen.
-# Braucht aus HACS: power-flow-card-plus und card-mod (nur für die gefüllte
-# Batterie-Karte). Braucht die Pakete poessl_monitor.yaml und
-# poessl_fallback.yaml im aktuellen Stand.
+# Paste: edit view > pencil on the view > "Edit in YAML",
+# replace the entire content.
+# Needs from HACS: power-flow-card-plus and card-mod (only for the filled
+# battery card). Needs the packages poessl_monitor.yaml and
+# poessl_fallback.yaml in their current version.
 # =====================================================================
 title: Strom
 path: solar

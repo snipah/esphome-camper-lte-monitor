@@ -1,13 +1,13 @@
 # =====================================================================
-# Home Assistant: Ersatz-Sensoren für die Strom-Seite des Pössl
+# Home Assistant: fallback sensors for the power page of the camper
 #
-# Jeder Sensor zeigt den Wert vom Cerbo, solange der verfügbar ist, und
-# fällt sonst auf den Wert des Fernmonitors zurück. Das Attribut "quelle"
-# zeigt, woher der aktuelle Wert stammt.
+# Each sensor shows the Cerbo value while it is available and otherwise
+# falls back to the remote monitor value. The attribute "quelle"
+# (source) shows where the current value comes from.
 #
-# Im Dashboard die bisherigen Cerbo-Entitäten durch diese Sensoren ersetzen.
-# Monitor-Werte werden nur verwendet, solange "Pössl Monitor aktuell" an ist,
-# die letzte Meldung also jünger als 2 h 15 min ist.
+# In the dashboard, replace the former Cerbo entities with these sensors.
+# Monitor values are only used while "Pössl Monitor aktuell" is on,
+# i.e. the last report is younger than 2 h 15 min.
 # =====================================================================
 
 template:
@@ -17,11 +17,11 @@ template:
         unit_of_measurement: "%"
         device_class: battery
         state_class: measurement
-        # Drei Quellen in dieser Reihenfolge: Cerbo, Shunt über den Monitor,
-        # BMS über den Monitor. Der Shunt liefert erst nach seinem ersten
-        # Abgleich bei 100 % einen Ladestand, bis dahin springt das BMS ein.
-        # Vom Cerbo gibt es zwei mögliche Entitäten: die frühere "Batterie 1"
-        # und den Ladestand des Gesamtsystems. Es zählt, welche gerade liefert.
+        # Three sources in this order: Cerbo, shunt via the monitor,
+        # BMS via the monitor. The shunt only provides a state of charge after
+        # its first sync at 100 %; until then the BMS steps in.
+        # There are two possible Cerbo entities: the former "Battery 1"
+        # and the system state of charge. Whichever delivers counts.
         state: >
           {% set cerbo1 = (states('sensor.victron_mqtt_battery_1_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
           {% set cerbo2 = (states('sensor.victron_mqtt_system_0_system_dc_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') %}
@@ -42,10 +42,10 @@ template:
                   or is_number((states('sensor.victron_mqtt_system_0_system_dc_battery_soc') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) %}Cerbo
             {% elif is_number(states('sensor.possl_monitor_ladestand')) %}Monitor (Shunt)
             {% else %}Monitor (BMS){% endif %}
-          # Ändert sich mit jeder Meldung des Monitors. Dadurch entsteht auch
-          # dann ein neuer Messpunkt, wenn der Ladestand gleich geblieben ist.
-          # Die Bilanz-Sensoren unten brauchen das, sonst fehlen ihnen bei
-          # einem ruhenden Akku die Stützpunkte.
+          # Changes with every monitor report. This creates a new data point
+          # even when the state of charge stayed the same.
+          # The balance sensors below need that, otherwise they lack data
+          # points while the battery is at rest.
           letzte_monitor_meldung: >
             {{ states('sensor.possl_monitor_letzte_meldung') }}
 
@@ -64,8 +64,8 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Der Monitor sendet keine Leistung, sie wird aus Spannung mal Strom
-      # berechnet. Vorzeichen wie bei Victron: positiv heißt Laden.
+      # The monitor does not send power; it is calculated as voltage times
+      # current. Sign as with Victron: positive means charging.
       - name: "Pössl Batterieleistung"
         unique_id: possl_fallback_battery_power
         unit_of_measurement: "W"
@@ -88,7 +88,7 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_279_battery_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Ausgabe in Minuten. Der Cerbo-Wert wird anhand seiner Einheit umgerechnet.
+      # Output in minutes. The Cerbo value is converted based on its unit.
       - name: "Pössl Restlaufzeit"
         unique_id: possl_fallback_time_to_go
         unit_of_measurement: "min"
@@ -110,8 +110,8 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_time_to_go') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Der Cerbo meldet die Summe aus Dach und Solartasche, der Monitor nur
-      # das Dach. Im Stand ist das dasselbe.
+      # The Cerbo reports the sum of roof and portable panel, the monitor only
+      # the roof. When parked that is the same.
       - name: "Pössl Solarleistung"
         unique_id: possl_fallback_pv_power
         unit_of_measurement: "W"
@@ -127,12 +127,12 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Ausgabe in kWh. Liefert sensor.solarertrag Wh, wird umgerechnet.
-      # Cerbo und Monitor lesen denselben Tageszähler des MPPT. Nach einem
-      # Neustart meldet der Cerbo aber erst einmal 0, obwohl der Monitor schon
-      # einen Ertrag kennt. Deshalb gilt der höhere der beiden Werte. Den
-      # Monitorwert nur, wenn seine letzte Meldung von heute ist, sonst würde
-      # nach Mitternacht noch der Ertrag von gestern stehen bleiben.
+      # Output in kWh. If sensor.solarertrag delivers Wh, it is converted.
+      # Cerbo and monitor read the same MPPT daily counter. After a
+      # restart, however, the Cerbo reports 0 at first while the monitor already
+      # knows a yield. So the higher of the two values wins. The
+      # monitor value only counts if its last report is from today, otherwise
+      # yesterday's yield would stick after midnight.
       - name: "Pössl Solarertrag"
         unique_id: possl_fallback_yield_today
         unit_of_measurement: "kWh"
@@ -162,10 +162,10 @@ template:
             {% set mv = mo.state | float if heute and is_number(mo.state) else -1 %}
             {{ 'Cerbo' if is_number(c) and c | float * f >= mv else 'Monitor' }}
 
-      # Derselbe Ertrag in Wh fürs Dashboard, weil kWh bei kleinen
-      # Wintererträgen nur 0,00 zeigt. Eigener Sensor statt geänderter Einheit,
-      # damit Home Assistant die alte Einheit nicht weiter anzeigt. Der Monitor
-      # liefert den Ertrag in Schritten von 10 Wh.
+      # The same yield in Wh for the dashboard, because kWh only shows 0.00
+      # for small winter yields. A separate sensor instead of a changed unit
+      # so Home Assistant doesn't keep showing the old unit. The monitor
+      # delivers the yield in 10 Wh steps.
       - name: "Pössl Solarertrag heute"
         unique_id: possl_fallback_yield_today_wh
         unit_of_measurement: "Wh"
@@ -175,10 +175,10 @@ template:
         availability: >
           {{ is_number(states('sensor.possl_solarertrag')) }}
 
-      # Ladephase des Dachreglers: vom Cerbo (Zustand des Ladereglers), sonst
-      # vom Monitor. Beide liefern dieselben Phasen (Off, Bulk, Absorption,
-      # Float), nur unterschiedlich geschrieben. Einheitlich übersetzt;
-      # unbekannte Werte bleiben, wie sie sind.
+      # Charge phase of the roof controller: from the Cerbo (charger state),
+      # otherwise from the monitor. Both deliver the same phases (Off, Bulk,
+      # Absorption, Float), just spelled differently. Translated uniformly;
+      # unknown values stay as they are.
       - name: "Pössl Dachsolar Status"
         unique_id: possl_fallback_mppt_state
         state: >
@@ -208,7 +208,7 @@ template:
             {% set leer = ['unavailable', 'unknown', 'none', 'None', ''] %}
             {{ 'Cerbo' if (states('sensor.victron_mqtt_solarcharger_278_solarcharger_state') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable') not in leer else 'Monitor' }}
 
-      # Zellspannungen: vom Cerbo, solange er am BMS hängt, sonst vom Monitor.
+      # Cell voltages: from the Cerbo while it is connected to the BMS, otherwise from the monitor.
       - name: "Pössl Zelle 1"
         unique_id: possl_fallback_cell1
         unit_of_measurement: "V"
@@ -269,9 +269,9 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_battery_1_battery_cell_4_voltage') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Abstand zwischen der höchsten und der niedrigsten Zelle in Millivolt.
-      # Bei einem gesunden Akku bleibt das im Ruhezustand im zweistelligen
-      # Bereich; ein dauerhaft wachsender Wert deutet auf eine schwache Zelle.
+      # Difference between the highest and lowest cell in millivolts.
+      # In a healthy battery at rest this stays in the double digits;
+      # a steadily growing value points to a weak cell.
       - name: "Pössl Zellabweichung"
         unique_id: possl_fallback_cell_delta
         unit_of_measurement: "mV"
@@ -289,9 +289,9 @@ template:
              and is_number(states('sensor.possl_zelle_3'))
              and is_number(states('sensor.possl_zelle_4')) }}
 
-      # Kühlschrank, Gefrierfach und Gas: live vom Cerbo, sonst vom Monitor.
-      # Auf dem Cerbo kommen die Werte als virtuelle Geräte aus Node-RED
-      # (Flow "esp-truma → Cerbo").
+      # Fridge, freezer and gas: live from the Cerbo, otherwise from the monitor.
+      # On the Cerbo the values come as virtual devices from Node-RED
+      # (flow "esp-truma → Cerbo").
       - name: "Pössl Kühlschrank"
         unique_id: possl_fallback_fridge
         unit_of_measurement: "°C"
@@ -337,7 +337,7 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.gas_fullstand') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Innenraum und Technikbereich: live vom Cerbo, sonst vom Monitor.
+      # Interior and technical area: live from the Cerbo, otherwise from the monitor.
       - name: "Pössl Innenraum"
         unique_id: possl_fallback_room
         unit_of_measurement: "°C"
@@ -389,10 +389,10 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.multiplus_temperatur') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Solarprognose von Forecast.Solar, einheitlich in Wh. Sie hängt nur vom
-      # Wetter ab und funktioniert deshalb auch bei ausgeschaltetem Cerbo.
-      # Die Einheit der Quelle wird beachtet, egal ob sie in den
-      # Entitätseinstellungen auf Wh oder kWh steht.
+      # Solar forecast from Forecast.Solar, uniformly in Wh. It only depends
+      # on the weather and therefore also works with the Cerbo off.
+      # The source unit is respected, whether it is set to Wh or kWh
+      # in the entity settings.
       - name: "Pössl Solarprognose heute"
         unique_id: possl_solar_forecast_today
         unit_of_measurement: "Wh"
@@ -426,12 +426,12 @@ template:
         availability: >
           {{ is_number(states('sensor.energy_production_today_remaining')) }}
 
-      # Ertrag gegen Prognose: Wie viel Prozent dessen, was laut Wetter bis
-      # jetzt hätte kommen sollen, hat das Dach geliefert? Deutlich unter 100
-      # heißt Schatten, Laub oder Schnee auf dem Modul.
-      # Nur aussagekräftig, solange der Regler alles abnimmt (Bulk bzw.
-      # MPPT aktiv). Bei vollem Akku drosselt er, dann bleibt der Wert leer.
-      # Leer bleibt er auch, solange die Prognose bis jetzt unter 50 Wh liegt.
+      # Yield vs. forecast: what percentage of what should have come so far
+      # according to the weather did the roof deliver? Well below 100
+      # means shade, leaves or snow on the panel.
+      # Only meaningful while the controller takes everything (Bulk or
+      # MPPT active). With a full battery it throttles, then the value stays empty.
+      # It also stays empty while the forecast so far is below 50 Wh.
       - name: "Pössl Solar Ertrag gegen Prognose"
         unique_id: possl_solar_performance
         unit_of_measurement: "%"
@@ -450,9 +450,9 @@ template:
              and erwartet >= 50
              and states('sensor.possl_dachsolar_status') | lower in ['bulk', 'mppt active', 'mppt aktiv'] }}
 
-      # Leistung am Lastausgang des Ladereglers. Läuft der Cerbo, gilt dein
-      # bisheriger Sensor, sonst rechnet der Monitor: Strom mal Spannung.
-      # Ob der Cerbo läuft, wird an seiner Solarleistung erkannt.
+      # Power on the charge controller's load output. With the Cerbo running your
+      # existing sensor applies, otherwise the monitor calculates current times voltage.
+      # Whether the Cerbo is running is detected from its solar power.
       - name: "Pössl Lastausgang Leistung"
         unique_id: possl_fallback_load_power
         unit_of_measurement: "W"
@@ -475,8 +475,8 @@ template:
           quelle: >
             {{ 'Cerbo' if is_number((states('sensor.victron_mqtt_system_0_system_dc_pv_power') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) and is_number((states('sensor.nettoleistung_lastausgang') if is_state('binary_sensor.possl_cerbo_live', 'on') else 'unavailable')) else 'Monitor' }}
 
-      # Zeit bis zur nächsten Meldung als Text, minutengenau und mit Uhrzeit.
-      # Die eingebaute Anzeige rundet ab einer Stunde auf volle Stunden.
+      # Time until the next report as text, to the minute and with clock time.
+      # The built-in display rounds to full hours above one hour.
       - name: "Pössl Nächste Meldung"
         unique_id: possl_next_due_text
         icon: mdi:timer-sand
@@ -496,16 +496,16 @@ template:
             {% endif %}
           {% endif %}
 
-  # An, sobald am Lastausgang mindestens 1 W fließt.
+  # On as soon as at least 1 W flows on the load output.
   - binary_sensor:
-      # Liefert der Cerbo gerade live? Ja, wenn sich mindestens ein Wert der
-      # Victron-Integration in den letzten 15 Minuten tatsächlich verändert
-      # hat. Die Integration schreibt nach dem Ausschalten die alten Werte
-      # weiter regelmäßig neu, deshalb zählt nur eine echte Änderung
-      # (last_changed), nicht jede Meldung. Bei laufendem Cerbo schwanken
-      # Leistung und Ströme ständig. Alle Ersatzsensoren nehmen Cerbo-Werte
-      # nur, solange dieser Sensor an ist. Das Dashboard blendet dann die
-      # Meldungen des Fernmonitors aus.
+      # Is the Cerbo delivering live? Yes if at least one value of the
+      # Victron integration actually changed within the last 15 minutes.
+      # After switching off, the integration keeps rewriting the old values
+      # regularly, so only a real change counts
+      # (last_changed), not every report. With the Cerbo running, power and
+      # currents fluctuate constantly. All fallback sensors take Cerbo values
+      # only while this sensor is on. The dashboard then hides the
+      # remote monitor messages.
       - name: "Pössl Cerbo live"
         unique_id: possl_cerbo_live
         device_class: connectivity
@@ -524,15 +524,15 @@ template:
         availability: >
           {{ is_number(states('sensor.possl_lastausgang_leistung')) }}
 
-      # Läuft die Kühlung? Zwei Bedingungen zusammen:
-      # - deutlich kälter als der Innenraum: Im Herbst und Winter kühlt der
-      #   geparkte Camper nachts von selbst ab, dann sind beide gleich kalt.
-      # - und absolut kalt (Kühlschrank unter 8 °C, Gefrierfach unter -5 °C):
-      #   Heizt sich der Innenraum tagsüber durch Sonne schnell auf, hinkt der
-      #   geschlossene Kühlschrank hinterher und ist ein paar Grad kälter,
-      #   obwohl er aus ist (Fehlalarm vom 14.10.2026).
-      # Nach dem Abschalten bleibt der Zustand noch 12 Stunden an, damit die
-      # Warnung "zu warm" auch beim langsamen Erwärmen greift.
+      # Is the cooling running? Two conditions together:
+      # - clearly colder than the interior: in autumn and winter the parked
+      #   camper cools down by itself at night, then both are equally cold.
+      # - and absolutely cold (fridge below 8 °C, freezer below -5 °C):
+      #   if the interior heats up quickly in the sun during the day, the
+      #   closed fridge lags behind and is a few degrees colder
+      #   although it is off (false alarm on 2026-10-14).
+      # After switching off, the state stays on for another 12 hours so the
+      # "too warm" warning also triggers when it warms up slowly.
       - name: "Pössl Kühlschrank läuft"
         unique_id: possl_fridge_running
         icon: mdi:fridge-outline
@@ -558,10 +558,10 @@ template:
              and is_number(states('sensor.possl_innenraum')) }}
 
 # ---------------------------------------------------------------------
-# Bilanz: Um wie viele Prozentpunkte hat sich der Ladestand verändert?
-# Positiv heißt, der Akku hat gewonnen. Solange noch keine vollen 24 Stunden
-# an Messpunkten vorliegen, nennt das Dashboard die tatsächlich abgedeckte
-# Zeit. Die 7-Tage-Bilanz zeigt es erst, wenn eine Woche Daten da ist.
+# Balance: by how many percentage points has the state of charge changed?
+# Positive means the battery gained. As long as there are not yet a full
+# 24 hours of data points, the dashboard names the time actually covered.
+# The 7-day balance only shows once a week of data is available.
 # ---------------------------------------------------------------------
 sensor:
   - platform: statistics
@@ -582,9 +582,9 @@ sensor:
       days: 7
     precision: 0
 
-  # Wie lange war der Lastausgang heute aktiv? Der Monitor sieht nur
-  # Momentaufnahmen, die Dauer ist deshalb auf den Meldetakt genau:
-  # tagsüber 30 Minuten, nachts 2 Stunden.
+  # How long was the load output active today? The monitor only sees
+  # snapshots, so the duration is only as precise as the report interval:
+  # 30 minutes during the day, 2 hours at night.
   - platform: history_stats
     name: "Pössl Lastausgang Einschaltdauer heute"
     unique_id: possl_load_on_today

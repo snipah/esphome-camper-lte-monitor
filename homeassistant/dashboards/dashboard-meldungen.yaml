@@ -1,13 +1,13 @@
 # =====================================================================
-# Pössl: Ansicht "Meldungen" (Adresse /lovelace/info)
+# Camper: "Meldungen" (messages) view (path /lovelace/info)
 #
-# Zeigt die letzte Benachrichtigung im vollen Wortlaut (Wochenbericht oder
-# Warnung) und darunter die neun davor. Ein Tipp auf die Mitteilung am
-# iPhone öffnet genau diese Seite.
+# Shows the last notification in full (weekly report or
+# warning) and the nine before it below. Tapping the notification on the
+# phone opens exactly this page.
 #
-# Einfügen: die Ansicht "info" öffnen > Stift an der Ansicht > "In YAML
-# bearbeiten", den ganzen Inhalt ersetzen. Der Pfad "info" muss so bleiben,
-# die Benachrichtigungen und die Plakette "Neue Meldung" verweisen darauf.
+# Paste: open the "info" view > pencil on the view > "Edit in
+# YAML", replace the entire content. The path "info" must stay as is;
+# the notifications and the "Neue Meldung" badge point to it.
 # =====================================================================
 title: Meldungen
 path: info

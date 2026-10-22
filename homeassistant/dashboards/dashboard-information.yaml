@@ -1,16 +1,16 @@
 # =====================================================================
-# Pössl: Ansicht "Information"
+# Camper: "Information" view
 #
-# Klima und Gas (immer sichtbar, Werte vom Cerbo oder vom Fernmonitor),
-# Heizung, Warmwasser und Licht (nur solange der Pössl an ist), dazu
-# Wetter und Türen.
-# Die Statuszeile zeigt nur, was Aufmerksamkeit braucht: Truma-Zustand,
-# offene Türen, zu warmer Kühlschrank, schwache Knopfzellen der
-# Funksensoren (unter 40 %).
+# Climate and gas (always visible, values from the Cerbo or the remote monitor),
+# heating, hot water and light (only while the camper is powered), plus
+# weather and doors.
+# The status row only shows what needs attention: Truma state,
+# open doors, fridge too warm, weak coin cells of the
+# wireless sensors (below 40 %).
 #
-# Einfügen: Ansicht bearbeiten > Stift an der Ansicht > "In YAML bearbeiten",
-# den ganzen Inhalt ersetzen.
-# Braucht aus HACS nur die weather-card.
+# Paste: edit view > pencil on the view > "Edit in YAML",
+# replace the entire content.
+# Only needs the weather-card from HACS.
 # =====================================================================
 title: Information
 icon: mdi:water-circle

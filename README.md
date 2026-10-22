@@ -7,8 +7,12 @@ over LTE through a WireGuard tunnel to Home Assistant at home and goes back to
 sleep. No Cerbo GX or router has to stay on.
 
 This is a hobby project, not a product. Everything is tailored to my vehicle and
-has to be adapted. No support, use at your own risk. Code comments are in
-German.
+has to be adapted. No support, use at your own risk.
+
+Code comments and log messages are in English. Entity names, notification
+texts and dashboard labels are still German, because they are what my own
+installation uses; translate them if you like (entity IDs are derived from
+the names, so change them consistently).
 
 ## Contents
 
@@ -93,7 +97,7 @@ parts entirely.
    `battery_279`) are the VRM instances of my devices. Without a Cerbo, remove
    the Cerbo branches; only the monitor values are used then.
 5. Dashboards: paste the views via "Raw configuration editor". Required HACS
-   cards: power-flow-card-plus, weather-card.
+   cards: power-flow-card-plus, card-mod, weather-card.
 
 ### Switching between Cerbo GX and monitor
 `binary_sensor.possl_cerbo_live` is on if any `sensor.victron_mqtt_*` has
