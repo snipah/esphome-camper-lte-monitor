@@ -23,7 +23,6 @@ the names, so change them consistently).
 | `homeassistant/poessl_monitor.yaml` | Package: webhook, sensors from the monitor, alerts, weekly report, notification script |
 | `homeassistant/poessl_fallback.yaml` | Package: dashboard sensors that switch between Cerbo GX and monitor |
 | `homeassistant/dashboards/*.yaml` | Dashboard views (power, information, messages) |
-| `node-red/nodered-esp-truma-cerbo.json` | Optional: Node-RED flow for the Cerbo GX (virtual temperature and tank devices) |
 
 File and entity names still carry the prefix `poessl`/`possl` from my vehicle
 (a Pössl van). Replace it with search and replace across all files at once if
@@ -107,13 +106,6 @@ the Cerbo is off. When live, the fallback sensors use the Cerbo values,
 otherwise the monitor values as long as its last report is younger than
 2 h 15 min. Solar yield uses the maximum of both sources, since the Cerbo
 reports 0 after a restart.
-
-### Node-RED on the Cerbo GX (optional)
-Requires Venus OS Large with Node-RED. The flow reads temperatures and gas
-level from the local MQTT broker and creates virtual devices with the
-`victron-virtual` nodes (node-red-contrib-victron). This survives reboots and
-firmware updates and shows up in VRM. The MQTT topics come from my second ESP
-(Truma heater control) and need to be adapted.
 
 ## Pitfalls
 

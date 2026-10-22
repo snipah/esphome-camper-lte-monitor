@@ -290,8 +290,8 @@ template:
              and is_number(states('sensor.possl_zelle_4')) }}
 
       # Fridge, freezer and gas: live from the Cerbo, otherwise from the monitor.
-      # On the Cerbo the values come as virtual devices from Node-RED
-      # (flow "esp-truma → Cerbo").
+      # On the Cerbo these are virtual temperature and tank devices; adjust
+      # the entity names to your setup or remove the Cerbo branch.
       - name: "Pössl Kühlschrank"
         unique_id: possl_fallback_fridge
         unit_of_measurement: "°C"

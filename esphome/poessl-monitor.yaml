@@ -385,8 +385,7 @@ sensor:
   # Gas cylinder (Mopeka Standard)
   - platform: mopeka_std_check
     mac_address: AA:BB:CC:DD:EE:02
-    # Same calibration as in the esp-truma (measured on my own cylinder),
-    # so Cerbo and remote monitor show the same level.
+    # Calibration measured on my own cylinder; adjust it to yours.
     tank_type: CUSTOM
     custom_distance_full: 290mm
     custom_distance_empty: 28mm
